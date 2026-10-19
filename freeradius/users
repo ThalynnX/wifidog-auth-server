@@ -1,0 +1,6 @@
+# FreeRADIUS users file
+testuser  Cleartext-Password := "testpass"
+    Reply-Message = "Welcome to WiFi!"
+
+admin  Cleartext-Password := "admin123"
+    Reply-Message = "Admin access granted"
