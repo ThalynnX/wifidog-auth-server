@@ -61,7 +61,7 @@ GatewayID my-gateway-001
 |----------|--------|-------------|
 | `/login` | GET | Gateway redirect entry |
 | `/portal` | GET/POST | User login page |
-| `/auth` | GET | Token validation (gateway polling) |
+| `/auth` | GET | Token validation |
 | `/ping` | GET | Gateway heartbeat |
 | `/msg` | GET | Display message |
 | `/status` | GET | Server status (JSON) |
