@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WiFi认证</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .card { background: #fff; border-radius: 12px; padding: 40px; width: 100%; max-width: 400px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
+    h1 { font-size: 24px; color: #333; margin-bottom: 8px; text-align: center; }
+    .subtitle { color: #666; font-size: 14px; text-align: center; margin-bottom: 30px; }
+    .form-group { margin-bottom: 20px; }
+    label { display: block; font-size: 14px; color: #555; margin-bottom: 6px; font-weight: 500; }
+    input[type="text"], input[type="password"] { width: 100%; padding: 12px 16px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 16px; outline: none; }
+    input:focus { border-color: #667eea; }
+    button { width: 100%; padding: 14px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #fff; border: none; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; }
+    .error { background: #fee; color: #c33; padding: 12px; border-radius: 8px; margin-bottom: 20px; font-size: 14px; text-align: center; }
+    .info { margin-top: 20px; padding: 12px; background: #f5f5f5; border-radius: 8px; font-size: 12px; color: #666; }
+    .info-row { display: flex; justify-content: space-between; margin-bottom: 4px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>WiFi认证</h1>
+    <p class="subtitle">请输入账号密码连接网络</p>
+    <% if (error) { %><div class="error"><%= error %></div><% } %>
+    <form method="POST" action="/portal">
+      <input type="hidden" name="ip" value="<%= ip %>">
+      <input type="hidden" name="mac" value="<%= mac %>">
+      <input type="hidden" name="token" value="<%= token %>">
+      <input type="hidden" name="ssid" value="<%= ssid %>">
+      <input type="hidden" name="gateway_id" value="<%= gateway_id %>">
+      <input type="hidden" name="gateway_address" value="<%= gateway_address %>">
+      <div class="form-group">
+        <label for="username">用户名</label>
+        <input type="text" id="username" name="username" required autofocus>
+      </div>
+      <div class="form-group">
+        <label for="password">密码</label>
+        <input type="password" id="password" name="password" required>
+      </div>
+      <button type="submit">登录</button>
+    </form>
+    <div class="info">
+      <div class="info-row"><span>设备MAC:</span><span><%= mac %></span></div>
+      <div class="info-row"><span>设备IP:</span><span><%= ip %></span></div>
+      <% if (ssid) { %><div class="info-row"><span>网络:</span><span><%= ssid %></span></div><% } %>
+    </div>
+  </div>
+</body>
+</html>
