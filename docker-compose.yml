@@ -1,39 +1,48 @@
-version: '3.8'
+version: "3.8"
+
 services:
   freeradius:
-    image: freeradius/freeradius-server:latest
+    image: freeradius/freeradius-server:latest   # pin a specific version in production
     container_name: freeradius
+    restart: unless-stopped
     ports:
       - "1812:1812/udp"
       - "1813:1813/udp"
     volumes:
       - ./freeradius/clients.conf:/etc/freeradius/clients.conf:ro
+      - ./freeradius/radiusd.conf:/etc/freeradius/radiusd.conf:ro
       - ./freeradius/users:/etc/freeradius/users:ro
-    restart: unless-stopped
     networks:
       - wifidog-net
+
   wifidog-auth:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: wifidog-auth
+    restart: unless-stopped
     ports:
       - "2060:2060"
     environment:
-      - PORT=2060
-      - HOST=0.0.0.0
-      - RADIUS_SERVER_HOST=freeradius
-      - RADIUS_SERVER_PORT=1812
-      - RADIUS_SECRET=testing123
-      - DB_PATH=/app/data/wifidog.db
-      - TOKEN_EXPIRY=3600
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 2060
+      AUTH_SERVER_URL: http://your-server-ip:2060
+      RADIUS_SERVER_HOST: freeradius
+      RADIUS_SERVER_PORT: 1812
+      RADIUS_SECRET: testing123
+      RADIUS_NAS_IP: 127.0.0.1
+      RADIUS_TIMEOUT_MS: 5000
+      RADIUS_RETRIES: 2
+      DB_PATH: /app/data/wifidog.db
+      TOKEN_EXPIRY: 3600
     volumes:
       - ./data:/app/data
     depends_on:
       - freeradius
-    restart: unless-stopped
     networks:
       - wifidog-net
+
 networks:
   wifidog-net:
     driver: bridge
