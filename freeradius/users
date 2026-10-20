@@ -1,4 +1,6 @@
-# FreeRADIUS users file
+# FreeRADIUS users file (flat-file backend)
+# For production, consider replacing with SQL / LDAP modules.
+
 testuser  Cleartext-Password := "testpass"
     Reply-Message = "Welcome to WiFi!"
 
