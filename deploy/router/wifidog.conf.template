@@ -1,0 +1,34 @@
+# WiFiDog Gateway 配置模板
+# 部署到路由器: /etc/wifidog/wifidog.conf
+
+# 网关标识 (必须与认证服务器配置一致)
+GatewayID jdcloud_re_ss_01
+
+# 内网接口 (连接客户端)
+Interface br-lan
+
+# 认证服务器配置
+AuthServer {
+    Hostname 1.13.168.245
+    Port 2060
+    SSLAvailable no
+    Path /
+}
+
+# 网关地址 (客户端认证后重定向到此)
+GatewayAddress 192.168.6.1
+
+# 检查间隔
+CheckInterval 30
+
+# 客户端超时
+ClientTimeout 1800
+
+# 全局 MAC 白名单 (不需要认证的设备)
+# TrustedMACList 00:11:22:33:44:55,AA:BB:CC:DD:EE:FF
+
+# HTTP 端口
+HTTPPort 80
+
+# 日志级别
+Loglevel 1

@@ -1,0 +1,19 @@
+[Unit]
+Description=WiFiDog Auth Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/wifidog-auth-server
+Environment=NODE_ENV=production
+Environment=PORT=2060
+Environment=RADIUS_SERVER_HOST=127.0.0.1
+Environment=RADIUS_SECRET=wifidog_radius_secret_change_me
+Environment=DB_PATH=/opt/wifidog-auth-server/data/wifidog.db
+ExecStart=/usr/bin/node src/server.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

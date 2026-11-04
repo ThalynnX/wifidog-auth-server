@@ -1,0 +1,7 @@
+# FreeRADIUS 用户文件
+# 格式: 用户名 Cleartext-Password := "密码"
+#
+# 示例:
+#   testuser Cleartext-Password := "testpass"
+#
+# 生产环境建议使用 SQL 或 LDAP 后端
