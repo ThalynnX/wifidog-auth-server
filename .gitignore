@@ -1,9 +1,5 @@
 node_modules/
 data/
-*.log
-npm-debug.log*
 .env
-.env.local
+*.log
 .DS_Store
-coverage/
-*.qoder.site
