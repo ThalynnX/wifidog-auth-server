@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 运行时数据（含密钥与数据库，绝不入库）
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/.secret_key
+data/*.bak
+
+# 日志
+logs/
+*.log
+
+# 环境与密钥
+.env
+.env.*
+!.env.example
+
+# 编辑器/系统
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# 构建产物
+dist/
+build/
+*.tar.gz
+!router-packages/*.tar.gz

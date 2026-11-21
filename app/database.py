@@ -1,0 +1,72 @@
+"""数据库引擎与会话管理。"""
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
+from .config import DB_URL, DB_ECHO, LOG_DIR
+
+_is_sqlite = DB_URL.startswith("sqlite")
+
+if _is_sqlite:
+    # check_same_thread=False 允许 FastAPI 多线程复用；WAL 提升并发读写能力
+    engine = create_engine(
+        DB_URL, echo=DB_ECHO, future=True, connect_args={"check_same_thread": False, "timeout": 30}
+    )
+
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_conn, _rec):  # noqa: ANN001
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA synchronous=NORMAL")
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.execute("PRAGMA busy_timeout=30000")
+        cur.close()
+else:
+    engine = create_engine(
+        DB_URL, echo=DB_ECHO, future=True, pool_pre_ping=True, pool_recycle=280, pool_size=10, max_overflow=20
+    )
+
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False, future=True)
+Base = declarative_base()
+
+
+def get_db():
+    """FastAPI 依赖：请求级会话。"""
+    db: Session = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def _migrate():
+    """轻量列迁移（幂等）：为已有库补齐后加的字段。"""
+    from sqlalchemy import text
+
+    wanted = {
+        "sms_codes": {"attempts": "INTEGER NOT NULL DEFAULT 0"},
+    }
+    with engine.connect() as conn:
+        for table, cols in wanted.items():
+            try:
+                if _is_sqlite:
+                    rows = conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
+                    existing = {r[1] for r in rows}
+                else:
+                    rows = conn.exec_driver_sql(
+                        f"SELECT COLUMN_NAME FROM information_schema.columns "
+                        f"WHERE TABLE_NAME=:t", {"t": table},
+                    ).fetchall()
+                    existing = {r[0] for r in rows}
+                for col, ddl in cols.items():
+                    if col not in existing:
+                        conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+                conn.commit()
+            except Exception as e:  # noqa: BLE001
+                print(f"[migrate] {table} 迁移跳过: {e}")
+
+
+def init_db():
+    """建表 + 迁移（幂等）。"""
+    from . import models  # noqa: F401  确保模型被注册
+
+    Base.metadata.create_all(bind=engine)
+    _migrate()

@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#07111d"><title>确认模拟支付 · WiFidog</title><link rel="icon" href="/static/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/static/ui.css?v=2.0.1"></head>
+<body class="portal-body">
+<main class="portal-wrap">
+  <div class="portal-top"><div class="brand"><div class="brand-mark"><svg viewBox="0 0 24 24"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6"/></svg></div><div><div class="brand-name">安全收银台</div><div class="brand-sub">Sandbox Payment</div></div></div><div class="portal-status"><i class="live-dot"></i>TEST MODE</div></div>
+  <section class="portal-card">
+    <div class="portal-hero"><div class="eyebrow">Order Confirmation</div><h1 class="portal-title" style="margin-top:8px">确认模拟支付</h1><p class="portal-sub">当前为测试环境，不会发生真实扣款</p></div>
+    <div class="notice warn">此页面仅在测试模式可用。正式环境将使用支付宝或微信支付，并由服务端验签回调确认。</div>
+    <div class="detail-list">
+      <div class="detail-row"><span>套餐名称</span><span>{{ order.plan_name }}</span></div>
+      <div class="detail-row"><span>订单编号</span><span class="mono">{{ order.order_no }}</span></div>
+      <div class="detail-row"><span>订单金额</span><span style="color:var(--cyan);font-size:20px;font-weight:700">¥{{ '%.2f'|format(order.amount / 100) }}</span></div>
+      <div class="detail-row"><span>订单状态</span><span id="orderStatus">{% if order.status == 0 %}待支付{% elif order.status == 1 %}已支付{% elif order.status == 2 %}已关闭{% else %}已退款{% endif %}</span></div>
+    </div>
+    <button class="btn block" id="payBtn" type="button" {% if order.status != 0 %}disabled{% endif %}>{% if order.status == 0 %}确认支付 ¥{{ '%.2f'|format(order.amount / 100) }}{% else %}当前订单不可支付{% endif %}</button>
+    <button class="btn ghost block" id="backBtn" type="button" style="margin-top:9px">返回套餐列表</button>
+    <button class="btn secondary block hide" id="statusBtn" type="button" style="margin-top:9px">查看网络状态</button>
+    <div class="form-msg" id="msg" role="status" aria-live="polite"></div>
+    <div class="portal-foot">支付确认具有幂等保护<br>重复订单或重复支付会被服务端拒绝</div>
+  </section>
+</main>
+<script src="/static/ui.js?v=2.0.1"></script>
+<script>
+(function(){
+  const btn=document.getElementById('payBtn'),msg=document.getElementById('msg'),statusBtn=document.getElementById('statusBtn');
+  const get=k=>{try{return localStorage.getItem(k)||''}catch(e){return''}},set=(k,v)=>{try{localStorage.setItem(k,v||'')}catch(e){}};
+  const say=(text,type)=>{msg.textContent=text||'';msg.className='form-msg'+(type?' '+type:'');};
+  const success=()=>{statusBtn.classList.remove('hide');statusBtn.onclick=()=>location.href='/portal/success?token='+encodeURIComponent(get('wg_token'))+'&gw_id='+encodeURIComponent(get('wg_gw_id'));};
+  async function recoverSession(){
+    const mac=get('wg_mac'),gwId=get('wg_gw_id');if(!mac||!gwId)return;
+    say('套餐已开通，正在建立设备会话…','info');
+    const r=await UI.post('/portal/api/device/auto',{mac,ip:get('wg_ip'),gw_id:gwId},{silent:true});
+    if(r.ok&&r.token)set('wg_token',r.token);
+  }
+  if({{ 1 if order.status == 1 else 0 }})success();
+  document.getElementById('backBtn').onclick=()=>location.href='/portal/plans?phone='+encodeURIComponent(get('wg_phone'))+'&token='+encodeURIComponent(get('wg_token'));
+  btn.onclick=async function(){
+    if(btn.dataset.busy==='1'||btn.disabled)return;
+    if(!await UI.confirm({title:'确认模拟支付',text:'确认支付订单 {{ order.order_no }}？测试环境不会真实扣款。',okText:'确认支付'}))return;
+    UI.busy(btn,true,'正在确认支付…');say('正在提交支付结果并开通套餐…','info');
+    const r=await UI.post('/portal/api/pay/confirm',{order_no:{{ order.order_no|tojson }}});
+    if(r.ok){document.getElementById('orderStatus').textContent='已支付';say(r.msg||'支付成功，套餐已开通','ok');success();btn.textContent='支付已完成';await recoverSession();say('支付成功，设备已就绪','ok');setTimeout(()=>statusBtn.click(),500);return;}
+    UI.busy(btn,false);say(r.msg||'支付确认失败');
+    if((r.msg||'').includes('已支付')){success();document.getElementById('orderStatus').textContent='已支付';}
+  };
+})();
+</script>
+</body></html>

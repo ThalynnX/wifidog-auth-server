@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  import-check:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt httpx
+      - name: Import & smoke test
+        env:
+          WIFIDOG_DB_URL: sqlite:////tmp/ci.db
+          WIFIDOG_RUN_MODE: test
+        run: |
+          python -c "import app.main; print('import ok')"
+          python - <<'PY'
+          from fastapi.testclient import TestClient
+          from app.main import app
+          with TestClient(app) as c:
+              assert c.get('/healthz').json()['ok'] is True
+              assert c.get('/wifidog/ping', params={'gw_id':'ci'}).text.strip() == 'Pong'
+              assert c.get('/admin/login').status_code == 200
+          print('smoke ok')
+          PY

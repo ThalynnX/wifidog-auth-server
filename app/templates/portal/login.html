@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#07111d">
+<title>{{ site_name }} · 网络认证</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/ui.css?v=2.0.1">
+</head>
+<body class="portal-body">
+<main class="portal-wrap">
+  <div class="portal-top">
+    <div class="brand">
+      <div class="brand-mark"><svg viewBox="0 0 24 24"><path d="M4 17a11 11 0 0 1 16 0M7 13.5a7 7 0 0 1 10 0M10.2 10.2a3 3 0 0 1 3.6 0"/><circle cx="12" cy="19" r="1"/></svg></div>
+      <div><div class="brand-name">{{ site_name }}</div><div class="brand-sub">Smart Network Access</div></div>
+    </div>
+    <div class="portal-status"><i class="live-dot"></i>PORTAL ONLINE</div>
+  </div>
+
+  <section class="portal-card">
+    <div class="portal-hero">
+      <div class="portal-emblem" aria-hidden="true"><i></i><i></i><i></i></div>
+      <div class="eyebrow">Secure Authentication</div>
+      <h1 class="portal-title" style="margin-top:8px">欢迎连接网络</h1>
+      <p class="portal-sub">验证身份，即刻开启稳定、安全的网络连接</p>
+    </div>
+
+    {% if site_notice %}<div class="notice">{{ site_notice }}</div>{% endif %}
+    <div class="notice hide" id="autoStatus" role="status"></div>
+
+    <div id="authArea">
+      <div class="tabs" role="tablist">
+        <button class="tab-btn active" id="smsTab" type="button" role="tab" aria-selected="true">手机验证</button>
+        <button class="tab-btn" id="pwdTab" type="button" role="tab" aria-selected="false">账号密码</button>
+      </div>
+
+      <form id="smsForm" novalidate>
+        <div class="field"><label for="phone">手机号码</label><input class="input" id="phone" type="tel" inputmode="numeric" placeholder="请输入 11 位手机号" maxlength="11" autocomplete="tel"></div>
+        <div class="field"><label for="code">短信验证码</label><div class="input-row"><input class="input" id="code" inputmode="numeric" placeholder="短信验证码" maxlength="6" autocomplete="one-time-code"><button class="btn secondary" id="sendBtn" type="button">获取验证码</button></div></div>
+        <button class="btn block" id="smsLoginBtn" type="submit">验证并连接网络</button>
+        <div class="form-msg" id="smsMsg" role="status" aria-live="polite"></div>
+      </form>
+
+      <form id="pwdForm" class="hide" novalidate>
+        <div class="field"><label for="username">账号</label><input class="input" id="username" placeholder="请输入账号" maxlength="64" autocomplete="username"></div>
+        <div class="field"><label for="password">密码</label><input class="input" id="password" type="password" placeholder="请输入密码" maxlength="128" autocomplete="current-password"></div>
+        <button class="btn block" id="pwdLoginBtn" type="submit">登录并连接网络</button>
+        <div class="form-msg" id="pwdMsg" role="status" aria-live="polite"></div>
+      </form>
+    </div>
+
+    <form id="rebindArea" class="hide" novalidate>
+      <div class="notice warn">当前设备与账号原绑定设备不一致。换绑后，新设备将成为该账号的绑定终端。</div>
+      <div class="field"><label for="boundMac">原绑定设备</label><input class="input mono" id="boundMac" value="{{ bound_mac or '未知' }}" disabled></div>
+      <div class="field"><label for="newMac">当前设备 MAC</label><input class="input mono" id="newMac" value="{{ cur_mac }}" maxlength="17" placeholder="00:11:22:33:44:55"></div>
+      <div class="field"><label for="newIp">当前设备 IP</label><input class="input mono" id="newIp" value="{{ ip }}" placeholder="自动获取"></div>
+      <button class="btn block" id="rebindBtn" type="submit">确认换绑并连接</button>
+      <button class="btn ghost block" id="rebindBack" type="button" style="margin-top:9px">返回重新验证</button>
+      <div class="form-msg" id="rebindMsg" role="status"></div>
+    </form>
+
+    <div class="portal-foot">连接即表示你同意遵守网络使用规范<br><span class="mono" id="gatewayInfo">{{ gw_id or 'GATEWAY' }} · ENCRYPTED SESSION</span></div>
+  </section>
+  <div style="text-align:center;margin-top:18px" class="eyebrow">WIFIDOG AUTH SERVER · V2.0.1</div>
+</main>
+<script src="/static/ui.js?v=2.0.1"></script>
+<script>
+(function(){
+  const $ = id => document.getElementById(id);
+  const q = new URLSearchParams(location.search);
+  const val = key => q.get(key) || '';
+  const store = {
+    get(key){ try { return localStorage.getItem(key) || ''; } catch(e){ return ''; } },
+    set(key, value){ try { localStorage.setItem(key, value || ''); } catch(e){} },
+    remove(key){ try { localStorage.removeItem(key); } catch(e){} }
+  };
+  const params = {
+    gw_id: val('gw_id') || store.get('wg_gw_id'), gw_address: val('gw_address') || store.get('wg_gw_address'),
+    gw_port: val('gw_port') || store.get('wg_gw_port'), mac: val('mac') || store.get('wg_mac'),
+    ip: val('ip') || store.get('wg_ip'), url: UI.safeReturnUrl(val('url') || store.get('wg_url'), val('gw_address') || store.get('wg_gw_address'))
+  };
+  Object.entries(params).forEach(([key,value]) => {
+    const storageKey = 'wg_' + ({gw_id:'gw_id',gw_address:'gw_address',gw_port:'gw_port',mac:'mac',ip:'ip',url:'url'}[key]);
+    if(value) store.set(storageKey, value); else store.remove(storageKey);
+  });
+  let changeToken = {{ change_token | tojson }};
+  let countdownTimer = null;
+
+  function say(id, text, type){ const el=$(id); el.textContent=text||''; el.className='form-msg'+(type?' '+type:''); }
+  function saveSession(token, phone){
+    if(token) store.set('wg_token',token); if(phone) store.set('wg_phone',phone);
+    Object.keys(params).forEach(key => { if(params[key]) store.set('wg_'+key,params[key]); });
+  }
+  function successUrl(token){ return '/portal/success?token='+encodeURIComponent(token||store.get('wg_token'))+'&gw_id='+encodeURIComponent(params.gw_id); }
+  function goPlans(phone){ location.href='/portal/plans?phone='+encodeURIComponent(phone||store.get('wg_phone'))+'&token='+encodeURIComponent(store.get('wg_token')); }
+  function selectTab(name){
+    const sms=name==='sms'; $('smsForm').classList.toggle('hide',!sms); $('pwdForm').classList.toggle('hide',sms);
+    $('smsTab').classList.toggle('active',sms); $('pwdTab').classList.toggle('active',!sms);
+    $('smsTab').setAttribute('aria-selected',sms); $('pwdTab').setAttribute('aria-selected',!sms);
+  }
+  $('smsTab').onclick=()=>selectTab('sms'); $('pwdTab').onclick=()=>selectTab('pwd');
+
+  function showRebind(show){
+    $('authArea').classList.toggle('hide',show); $('rebindArea').classList.toggle('hide',!show);
+    document.querySelector('.tabs') && document.querySelector('.tabs').classList.toggle('hide',show);
+    if(show && !$('newMac').value) $('newMac').value=params.mac;
+    if(show && !$('newIp').value) $('newIp').value=params.ip;
+  }
+  if(changeToken) showRebind(true);
+  $('rebindBack').onclick=()=>{ changeToken=''; startCountdown(0); showRebind(false); selectTab('sms'); say('smsMsg','请重新获取验证码登录','info'); };
+
+  function startCountdown(seconds){
+    clearInterval(countdownTimer); const btn=$('sendBtn'); let left=seconds; btn.disabled=true;
+    const tick=()=>{ btn.textContent=left>0?left+' 秒后重发':'重新获取'; if(left<=0){clearInterval(countdownTimer);btn.disabled=false;} left--; };
+    tick(); countdownTimer=setInterval(tick,1000);
+  }
+  $('sendBtn').onclick=async function(){
+    if(this.disabled||this.dataset.busy==='1') return;
+    const phone=$('phone').value.trim();
+    if(!/^1\d{10}$/.test(phone)){say('smsMsg','请输入正确的 11 位手机号');$('phone').focus();return;}
+    UI.busy(this,true,'发送中…'); say('smsMsg','正在请求验证码…','info');
+    const r=await UI.post('/portal/api/send_code',{phone}); UI.busy(this,false);
+    if(!r.ok){say('smsMsg',r.msg||'验证码发送失败');return;}
+    if(r.dev_code){$('code').value=r.dev_code;say('smsMsg','测试模式验证码已自动填入','ok');}
+    else say('smsMsg','验证码已发送，请注意查收','ok');
+    startCountdown(60); $('code').focus();
+  };
+  $('phone').oninput=function(){this.value=this.value.replace(/\D/g,'').slice(0,11);};
+  $('code').oninput=function(){this.value=this.value.replace(/\D/g,'').slice(0,6);};
+
+  $('smsForm').onsubmit=async function(event){
+    event.preventDefault(); const btn=$('smsLoginBtn'); if(btn.dataset.busy==='1')return;
+    const phone=$('phone').value.trim(),code=$('code').value.trim();
+    if(!/^1\d{10}$/.test(phone)){say('smsMsg','请输入正确的手机号');return;}
+    if(!/^\d{4,6}$/.test(code)){say('smsMsg','请输入 4–6 位短信验证码');return;}
+    UI.busy(btn,true,'正在认证…');say('smsMsg','正在验证账号与设备状态…','info');
+    const r=await UI.post('/portal/api/login',Object.assign({phone,code},params));
+    if(r.ok){saveSession(r.token,phone);say('smsMsg','认证成功，正在进入网络状态页…','ok');setTimeout(()=>location.href=successUrl(r.token),350);return;}
+    UI.busy(btn,false);
+    if(r.need_device){changeToken=r.change_token;showRebind(true);say('rebindMsg',r.msg||'请确认更换绑定设备');return;}
+    if(r.need_buy){saveSession('',phone);say('smsMsg','验证通过，正在选择套餐…','ok');setTimeout(()=>goPlans(phone),350);return;}
+    say('smsMsg',r.msg||'认证失败，请稍后重试');
+  };
+
+  $('pwdForm').onsubmit=async function(event){
+    event.preventDefault();const btn=$('pwdLoginBtn');if(btn.dataset.busy==='1')return;
+    const username=$('username').value.trim(),password=$('password').value;
+    if(!username||!password){say('pwdMsg','请输入账号和密码');return;}
+    UI.busy(btn,true,'正在登录…');say('pwdMsg','正在验证账号…','info');
+    const r=await UI.post('/portal/api/password_login',Object.assign({username,password},params));
+    if(r.ok){saveSession(r.token,'');say('pwdMsg','登录成功，正在连接…','ok');setTimeout(()=>{location.href=r.redirect||successUrl(r.token);},350);return;}
+    UI.busy(btn,false);
+    if(r.need_buy){say('pwdMsg','账号有效，请选择套餐','info');setTimeout(()=>goPlans(store.get('wg_phone')),500);return;}
+    say('pwdMsg',r.msg||'登录失败');
+  };
+
+  $('rebindArea').onsubmit=async function(event){
+    event.preventDefault();const btn=$('rebindBtn');if(btn.dataset.busy==='1')return;
+    const mac=$('newMac').value.trim(),ip=$('newIp').value.trim();
+    if(!mac){say('rebindMsg','请填写当前设备 MAC 地址');return;}
+    if(!changeToken){say('rebindMsg','换绑凭证已失效，请返回重新验证');return;}
+    UI.busy(btn,true,'正在换绑…');say('rebindMsg','正在更新绑定并尝试放行…','info');
+    const r=await UI.post('/portal/api/device/rebind',{change_token:changeToken,mac,ip,gw_id:params.gw_id});
+    if(r.ok){saveSession(r.token,'');say('rebindMsg',r.msg||'换绑成功','ok');setTimeout(()=>location.href=successUrl(r.token),450);return;}
+    UI.busy(btn,false);say('rebindMsg',r.msg||'换绑失败');
+  };
+
+  async function autoDevice(){
+    if(!params.mac||!params.gw_id||changeToken)return;
+    const box=$('autoStatus');box.textContent='正在识别已认证设备…';box.classList.remove('hide');
+    const r=await UI.post('/portal/api/device/auto',{mac:params.mac,ip:params.ip,gw_id:params.gw_id},{silent:true});
+    if(r.ok){saveSession(r.token||'',r.phone||'');box.textContent=r.msg||'设备已识别，正在自动放行';setTimeout(()=>location.href=successUrl(r.token||''),500);}
+    else box.classList.add('hide');
+  }
+  autoDevice();
+})();
+</script>
+</body>
+</html>

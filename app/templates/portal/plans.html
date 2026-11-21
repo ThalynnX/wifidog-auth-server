@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#07111d">
+<title>选择上网套餐 · WiFidog</title><link rel="icon" href="/static/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/static/ui.css?v=2.0.1">
+</head>
+<body class="portal-body">
+<main class="portal-wrap">
+  <div class="portal-top">
+    <div class="brand"><div class="brand-mark"><svg viewBox="0 0 24 24"><path d="M4 17a11 11 0 0 1 16 0M7 13.5a7 7 0 0 1 10 0M10.2 10.2a3 3 0 0 1 3.6 0"/><circle cx="12" cy="19" r="1"/></svg></div><div><div class="brand-name">WiFidog 认证服务</div><div class="brand-sub">Flexible Network Plans</div></div></div>
+    <button class="btn small ghost" id="backLogin" type="button">返回登录</button>
+  </div>
+  <section class="portal-card">
+    <div class="portal-hero" style="margin-bottom:18px"><div class="eyebrow">Select Your Plan</div><h1 class="portal-title" style="margin-top:8px">选择上网套餐</h1><p class="portal-sub">按需选择，支付完成后自动开通</p></div>
+    {% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+    <div class="field"><label for="phone">开通手机号</label><input class="input" id="phone" type="tel" inputmode="numeric" maxlength="11" value="{{ phone }}" placeholder="请输入接收套餐的手机号"><span class="help">套餐将开通到该手机号对应的账号</span></div>
+    <div class="plan-list" id="planList">
+      {% for p in plans %}
+      <button class="plan-item" type="button" data-plan-id="{{ p.id }}" data-plan-name="{{ p.name }}">
+        <span><span class="plan-name">{{ p.name }}</span><span class="plan-desc">
+          {% if p.duration_minutes %}{{ p.duration_minutes }} 分钟{% else %}不限时长{% endif %} ·
+          {% if p.traffic_mb %}{{ p.traffic_mb }} MB{% else %}不限流量{% endif %} ·
+          {{ p.device_limit or '不限' }} 台设备{% if p.valid_days %} · {{ p.valid_days }} 天有效{% endif %}
+          {% if p.description %}<br>{{ p.description }}{% endif %}
+        </span></span>
+        <span class="plan-price"><small>¥</small>{{ '%.2f'|format(p.price / 100) }}</span>
+      </button>
+      {% else %}<div class="empty"><strong>暂无可购买套餐</strong>请稍后刷新或联系网络管理员</div>{% endfor %}
+    </div>
+    <div class="form-msg" id="msg" role="status" aria-live="polite"></div>
+    <button class="btn ghost block" id="refreshBtn" type="button" style="margin-top:8px">刷新套餐</button>
+    <div class="portal-foot">支付渠道由服务端安全选择<br>请勿重复提交订单，支付结果以服务端回调为准</div>
+  </section>
+</main>
+<script src="/static/ui.js?v=2.0.1"></script>
+<script>
+(function(){
+  const phoneInput=document.getElementById('phone'),msg=document.getElementById('msg');
+  const store={get(k){try{return localStorage.getItem(k)||''}catch(e){return''}},set(k,v){try{localStorage.setItem(k,v||'')}catch(e){}}};
+  if(!phoneInput.value)phoneInput.value=store.get('wg_phone');
+  const say=(text,type)=>{msg.textContent=text||'';msg.className='form-msg'+(type?' '+type:'');};
+  phoneInput.oninput=function(){this.value=this.value.replace(/\D/g,'').slice(0,11);store.set('wg_phone',this.value);};
+  document.getElementById('backLogin').onclick=()=>location.href='/wifidog/login?gw_id='+encodeURIComponent(store.get('wg_gw_id'))+'&mac='+encodeURIComponent(store.get('wg_mac'))+'&ip='+encodeURIComponent(store.get('wg_ip'));
+  document.getElementById('refreshBtn').onclick=function(){this.disabled=true;this.textContent='正在刷新…';location.reload();};
+  document.querySelectorAll('[data-plan-id]').forEach(btn=>btn.onclick=async function(){
+    if(btn.dataset.busy==='1')return;
+    const phone=phoneInput.value.trim();
+    if(!/^1\d{10}$/.test(phone)){say('请输入正确的 11 位开通手机号');phoneInput.focus();return;}
+    store.set('wg_phone',phone);UI.busy(btn,true,'正在创建订单…');say('正在安全创建订单，请勿重复点击…','info');
+    const r=await UI.post('/portal/api/buy',{plan_id:Number(btn.dataset.planId),phone,token:store.get('wg_token')});
+    if(!r.ok){UI.busy(btn,false);say(r.msg||'订单创建失败，请稍后重试');return;}
+    say('订单创建成功，正在前往支付…','ok');
+    if(!r.pay_url){UI.busy(btn,false);say('订单已创建，但未获得支付地址，请刷新后重试');return;}
+    let target;try{target=new URL(r.pay_url,location.origin);}catch(e){UI.busy(btn,false);say('支付地址无效，请联系管理员');return;}
+    if(!['http:','https:'].includes(target.protocol)){UI.busy(btn,false);say('支付协议不受支持');return;}
+    setTimeout(()=>location.href=target.href,300);
+  });
+})();
+</script>
+</body></html>

@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#07111d">
+<title>{{ site_name }} · 运营控制台</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/ui.css?v=2.0.1">
+</head>
+<body>
+<div class="admin-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 17a11 11 0 0 1 16 0M7 13.5a7 7 0 0 1 10 0M10.2 10.2a3 3 0 0 1 3.6 0"/><circle cx="12" cy="19" r="1"/></svg></div>
+        <div><div class="brand-name">{{ site_name }}</div><div class="brand-sub">Operations Center</div></div>
+      </div>
+    </div>
+    <div class="sidebar-status"><i class="live-dot"></i><span>认证服务运行中</span><span class="mono" style="margin-left:auto">ONLINE</span></div>
+    <nav class="nav" aria-label="后台导航">
+      <button class="nav-btn active" data-page="dash" type="button"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span>数据概览</span></button>
+      <button class="nav-btn" data-page="users" type="button"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20c0-4 2-6 6-6s6 2 6 6M17 8h4M19 6v4"/></svg><span>用户管理</span></button>
+      <button class="nav-btn" data-page="devices" type="button"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4M7 9h2M11 9h2M15 9h2"/></svg><span>设备管理</span></button>
+      <button class="nav-btn" data-page="plans" type="button"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="8" cy="6" r="1"/><circle cx="16" cy="12" r="1"/><circle cx="10" cy="18" r="1"/></svg><span>套餐管理</span></button>
+      <button class="nav-btn" data-page="orders" type="button"><svg viewBox="0 0 24 24"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6"/></svg><span>订单管理</span></button>
+      <button class="nav-btn" data-page="sessions" type="button"><svg viewBox="0 0 24 24"><path d="M4 17a11 11 0 0 1 16 0M7 13.5a7 7 0 0 1 10 0"/><circle cx="12" cy="19" r="1"/></svg><span>在线会话</span></button>
+      <button class="nav-btn" data-page="whitelist" type="button"><svg viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3 8-8 10-5-2-8-5-8-10V6z"/><path d="M8 12l3 3 5-6"/></svg><span>访问控制</span></button>
+      <button class="nav-btn" data-page="logs" type="button"><svg viewBox="0 0 24 24"><path d="M5 3h14v18H5zM8 8h8M8 12h8M8 16h5"/></svg><span>认证日志</span></button>
+      <button class="nav-btn" data-page="settings" type="button"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg><span>系统设置</span></button>
+    </nav>
+    <div class="sidebar-foot">WIFIDOG AUTH SERVER<br>BUILD 2.0.1 · FASTAPI</div>
+  </aside>
+  <div class="sidebar-mask hide" id="sidebarMask"></div>
+
+  <main class="admin-main">
+    <header class="topbar">
+      <div style="display:flex;align-items:center;gap:12px;min-width:0">
+        <button class="icon-btn menu-toggle" id="menuToggle" type="button" aria-label="打开导航"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+        <div class="page-heading"><div class="page-title" id="pageTitle">数据概览</div><div class="page-path" id="pagePath">CONSOLE / DASHBOARD</div></div>
+      </div>
+      <div class="top-actions">
+        <span class="clock" id="clock">--</span>
+        <div class="user-chip"><span class="avatar" id="avatar">A</span><span class="username" id="who">加载中</span></div>
+        <button class="btn small ghost" id="logoutBtn" type="button">退出</button>
+      </div>
+    </header>
+
+    <div class="admin-content">
+      <section class="page active" id="page-dash">
+        <div class="metrics" id="metrics"></div>
+        <div class="dash-grid">
+          <div class="panel"><div class="panel-head"><div><div class="panel-title">近 7 日认证趋势</div><div class="panel-desc">每日成功认证次数</div></div><button class="btn small secondary" id="dashRefresh" type="button">刷新数据</button></div><div class="panel-body"><div class="chart" id="chart"></div><div class="muted" style="font-size:11px;margin-top:12px" id="lastRefresh">尚未刷新</div></div></div>
+          <div class="panel"><div class="panel-head"><div class="panel-title">系统运行状态</div></div><div class="panel-body"><div class="health-list" id="healthList"></div><div class="notice" style="margin:18px 0 0">核心认证协议与计费逻辑保持独立运行，界面操作失败不会影响网关已有会话。</div></div></div>
+        </div>
+      </section>
+
+      <section class="page" id="page-users">
+        <div class="panel"><div class="panel-head"><div><div class="panel-title">用户管理</div><div class="panel-desc">查询账号、开通套餐、禁用或恢复用户</div></div><div class="toolbar"><input class="input" id="uq" placeholder="手机号 / 用户名 / 昵称" maxlength="64"><button class="btn secondary" id="userSearch" type="button">搜索</button><button class="btn ghost" id="userRefresh" type="button">刷新</button></div></div><div class="panel-body flush"><div id="usersBox"></div><div id="usersPager"></div></div></div>
+      </section>
+
+      <section class="page" id="page-devices">
+        <div class="panel"><div class="panel-head"><div><div class="panel-title">网关设备</div><div class="panel-desc">管理 apfree-wifidog / wifidog 网关心跳与状态</div></div><div class="toolbar"><button class="btn ghost" id="deviceRefresh" type="button">刷新</button><button class="btn" id="deviceAdd" type="button">＋ 新增设备</button></div></div><div class="panel-body flush"><div id="devicesBox"></div></div></div>
+      </section>
+
+      <section class="page" id="page-plans">
+        <div class="panel"><div class="panel-head"><div><div class="panel-title">套餐管理</div><div class="panel-desc">时长、流量、包期、免费体验与上下行限速</div></div><div class="toolbar"><button class="btn ghost" id="planRefresh" type="button">刷新</button><button class="btn" id="planAdd" type="button">＋ 新增套餐</button></div></div><div class="panel-body flush"><div id="plansBox"></div></div></div>
+      </section>
+
+      <section class="page" id="page-orders">
+        <div class="panel"><div class="panel-head"><div><div class="panel-title">订单管理</div><div class="panel-desc">支付流水、退款登记与套餐撤销</div></div><div class="toolbar"><select class="select" id="ostatus" aria-label="订单状态"><option value="-1">全部状态</option><option value="0">待支付</option><option value="1">已支付</option><option value="2">已关闭</option><option value="3">已退款</option></select><button class="btn ghost" id="orderRefresh" type="button">刷新</button></div></div><div class="panel-body flush"><div id="ordersBox"></div><div id="ordersPager"></div></div></div>
+      </section>
+
+      <section class="page" id="page-sessions">
+        <div class="panel"><div class="panel-head"><div><div class="panel-title">在线会话</div><div class="panel-desc">实时终端、流量统计、踢线或加入黑名单</div></div><button class="btn secondary" id="sessionRefresh" type="button">刷新会话</button></div><div class="panel-body flush"><div id="sessionsBox"></div></div></div>
+      </section>
+
+      <section class="page" id="page-whitelist">
+        <div class="panel"><div class="panel-head"><div><div class="panel-title">免认证 MAC 白名单</div><div class="panel-desc">收银机、打印机等固定设备无感放行</div></div><button class="btn" id="macAdd" type="button">＋ 添加 MAC</button></div><div class="panel-body flush"><div id="wlBox"></div></div></div>
+        <div class="panel"><div class="panel-head"><div><div class="panel-title">免认证 IP 白名单</div><div class="panel-desc">支持单 IP 或 CIDR 网段，适用于有线办公区</div></div><button class="btn" id="ipAdd" type="button">＋ 添加 IP / 网段</button></div><div class="panel-body flush"><div id="ipwlBox"></div></div></div>
+        <div class="panel"><div class="panel-head"><div><div class="panel-title">强制断网 MAC 黑名单</div><div class="panel-desc">优先级最高，覆盖白名单和有效套餐</div></div><button class="btn danger" id="blackAdd" type="button">＋ 拉黑 MAC</button></div><div class="panel-body flush"><div id="blBox"></div></div></div>
+      </section>
+
+      <section class="page" id="page-logs">
+        <div class="panel"><div class="panel-head"><div><div class="panel-title">认证日志</div><div class="panel-desc">登录、下线、拒绝、支付与设备事件</div></div><button class="btn secondary" id="logRefresh" type="button">刷新日志</button></div><div class="panel-body flush"><div id="logsBox"></div><div id="logsPager"></div></div></div>
+      </section>
+
+      <section class="page" id="page-settings">
+        <div class="settings-grid">
+          <div class="panel"><div class="panel-head"><div><div class="panel-title">系统设置</div><div class="panel-desc">保存后立即生效，不需要重启服务</div></div><button class="btn" id="settingsSave" type="button">保存设置</button></div><div class="panel-body">
+            <div class="field"><label for="set_run_mode">运行模式</label><select class="select" id="set_run_mode"><option value="test">测试模式 · mock 短信 / 支付</option><option value="production">正式模式 · 真实短信 / 支付</option></select><span class="help">切正式模式前，请确认下方通道均已配置并完成小额实测。</span></div>
+            <div class="field"><label for="set_site_name">站点名称</label><input class="input" id="set_site_name" maxlength="64" placeholder="例如：示例企业"></div>
+            <div class="form-grid"><div class="field"><label for="set_free">免费体验（分钟）</label><input class="input" id="set_free" type="number" min="0" max="100000" value="0"><span class="help">0 表示关闭</span></div><div class="field"><label for="set_limit">默认设备数</label><input class="input" id="set_limit" type="number" min="0" max="100" value="0"><span class="help">0 表示不限</span></div></div>
+            <div class="field"><label for="set_notice">门户公告</label><textarea class="textarea" id="set_notice" maxlength="500" placeholder="显示在认证页的公告内容"></textarea><span class="help"><span id="noticeCount">0</span> / 500 字</span></div>
+          </div></div>
+          <div>
+            <div class="panel"><div class="panel-head"><div class="panel-title">通道状态</div><button class="btn small ghost" id="channelRefresh" type="button">刷新</button></div><div class="panel-body"><div class="channel-list" id="channels"></div><div class="notice" style="margin:14px 0 0">短信与支付密钥仅从服务器 <span class="mono">.env</span> 读取，不在网页中显示或保存。</div></div></div>
+            <div class="panel"><div class="panel-head"><div><div class="panel-title">修改管理员密码</div><div class="panel-desc">至少 8 位，建议混合字母、数字与符号</div></div></div><div class="panel-body">
+              <div class="field"><label for="pwd_old">原密码</label><input class="input" id="pwd_old" type="password" autocomplete="current-password"></div>
+              <div class="field"><label for="pwd_new">新密码</label><input class="input" id="pwd_new" type="password" autocomplete="new-password" minlength="8"></div>
+              <div class="field"><label for="pwd_confirm">确认新密码</label><input class="input" id="pwd_confirm" type="password" autocomplete="new-password" minlength="8"></div>
+              <button class="btn block" id="passwordSave" type="button">确认修改密码</button>
+            </div></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+<div id="modalRoot"></div>
+<script src="/static/ui.js?v=2.0.1"></script>
+<script>
+const $ = id => document.getElementById(id);
+const state = { devices: [], plans: [], sessions: [], orders: [], usersPage: 1, ordersPage: 1, logsPage: 1, current: 'dash' };
+const pageMeta = {
+  dash: ['数据概览', 'DASHBOARD', loadDash], users: ['用户管理', 'USERS', () => loadUsers(1)],
+  devices: ['设备管理', 'GATEWAYS', loadDevices], plans: ['套餐管理', 'PLANS', loadPlans],
+  orders: ['订单管理', 'ORDERS', () => loadOrders(1)], sessions: ['在线会话', 'SESSIONS', loadSessions],
+  whitelist: ['访问控制', 'ACCESS CONTROL', loadWl], logs: ['认证日志', 'AUTH LOGS', () => loadLogs(1)],
+  settings: ['系统设置', 'SETTINGS', loadSettings]
+};
+
+function openModal({title, body, okText = '确认保存', danger = false, onOk}) {
+  const layer = document.createElement('div');
+  layer.className = 'modal-layer';
+  layer.innerHTML = '<div class="modal-box" role="dialog" aria-modal="true"><div class="modal-head"><div class="modal-title">' + UI.esc(title) + '</div><button type="button" class="modal-close" data-close aria-label="关闭">×</button></div><div class="modal-body">' + body + '</div><div class="modal-msg" role="alert"></div><div class="modal-foot"><button type="button" class="btn ghost" data-close>取消</button><button type="button" class="btn ' + (danger ? 'danger' : '') + '" data-ok>' + UI.esc(okText) + '</button></div></div>';
+  $('modalRoot').appendChild(layer);
+  const close = () => layer.remove();
+  layer.querySelectorAll('[data-close]').forEach(btn => btn.onclick = close);
+  layer.onclick = e => { if (e.target === layer) close(); };
+  const ok = layer.querySelector('[data-ok]');
+  const error = layer.querySelector('.modal-msg');
+  ok.onclick = async () => {
+    if (ok.dataset.busy === '1') return;
+    error.className = 'modal-msg'; error.textContent = '';
+    UI.busy(ok, true, '正在提交…');
+    try {
+      const result = await onOk(layer);
+      if (result === true) close();
+      else { error.textContent = typeof result === 'string' ? result : '操作失败，请检查输入'; error.className = 'modal-msg show'; }
+    } finally { UI.busy(ok, false); }
+  };
+  const first = layer.querySelector('input:not([type=checkbox]),select,textarea');
+  if (first) first.focus();
+  return layer;
+}
+
+function switchPage(name, updateHash = true) {
+  if (!pageMeta[name]) name = 'dash';
+  state.current = name;
+  document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.page === name));
+  document.querySelectorAll('.page').forEach(page => page.classList.toggle('active', page.id === 'page-' + name));
+  $('pageTitle').textContent = pageMeta[name][0];
+  $('pagePath').textContent = 'CONSOLE / ' + pageMeta[name][1];
+  closeSidebar();
+  if (updateHash && location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
+  pageMeta[name][2]().catch(err => { console.error(err); UI.toast('页面加载失败：' + err.message, 'error'); });
+}
+
+function openSidebar(){ $('sidebar').classList.add('open'); $('sidebarMask').classList.remove('hide'); }
+function closeSidebar(){ $('sidebar').classList.remove('open'); $('sidebarMask').classList.add('hide'); }
+document.querySelectorAll('.nav-btn').forEach(btn => btn.onclick = () => switchPage(btn.dataset.page));
+$('menuToggle').onclick = openSidebar; $('sidebarMask').onclick = closeSidebar;
+
+async function loadDash() {
+  const r = await UI.api('/admin/api/stats');
+  if (!r.ok) return UI.toast(r.msg || '概览加载失败', 'error');
+  const cards = [
+    ['在线用户', r.online_users, '当前认证账号'], ['在线终端', r.online_sessions, '活跃会话数量'],
+    ['在线设备', r.devices_online + ' / ' + r.devices_total, '在线 / 全部网关'], ['今日认证', r.auth_today, '成功认证次数'],
+    ['今日收入', UI.money(r.income_today), '已支付订单'], ['累计收入', UI.money(r.income_total), '全部已支付订单'],
+    ['用户总数', r.users_total, '今日新增 ' + r.users_today], ['待支付订单', r.orders_pending, '等待用户付款']
+  ];
+  $('metrics').innerHTML = cards.map((c, i) => '<div class="metric"><div class="metric-label"><span>' + c[0] + '</span><span class="mono">0' + (i + 1) + '</span></div><div class="metric-value">' + c[1] + '</div><div class="metric-foot">' + c[2] + '</div></div>').join('');
+  const trend = Array.isArray(r.trend) ? r.trend : [];
+  const max = Math.max(1, ...trend.map(t => Number(t.count) || 0));
+  $('chart').innerHTML = trend.map(t => '<div class="chart-col"><span class="chart-num">' + (Number(t.count) || 0) + '</span><div class="chart-track"><div class="chart-bar" style="height:' + Math.max(2, (Number(t.count) || 0) / max * 100) + '%"></div></div><span class="chart-date">' + UI.esc(t.date) + '</span></div>').join('') || '<div class="empty" style="width:100%">暂无趋势数据</div>';
+  const deviceRate = r.devices_total ? Math.round(r.devices_online / r.devices_total * 100) : 0;
+  $('healthList').innerHTML = [
+    ['认证服务', '正常', 100], ['网关在线率', r.devices_online + ' / ' + r.devices_total, deviceRate],
+    ['今日用户增长', '+' + r.users_today, Math.min(100, r.users_today * 10)], ['待处理订单', r.orders_pending + ' 笔', Math.min(100, r.orders_pending * 10)]
+  ].map(h => '<div><div class="health-row"><span class="k">' + h[0] + '</span><strong>' + h[1] + '</strong></div><div class="health-line"><i style="width:' + h[2] + '%"></i></div></div>').join('');
+  $('lastRefresh').textContent = '最后更新：' + new Date().toLocaleString('zh-CN', {hour12:false});
+}
+$('dashRefresh').onclick = loadDash;
+
+async function loadUsers(page = 1) {
+  const q = $('uq').value.trim(); state.usersPage = Math.max(1, page);
+  const r = await UI.api('/admin/api/users?q=' + encodeURIComponent(q) + '&page=' + state.usersPage + '&size=20');
+  if (!r.ok) { $('usersBox').innerHTML = ''; $('usersPager').innerHTML = ''; return UI.toast(r.msg || '用户加载失败', 'error'); }
+  $('usersBox').innerHTML = UI.table(['ID', '手机号 / 用户名', '昵称', '当前套餐', '到期时间', '在线', '状态', '注册时间', '操作'], (r.rows || []).map(u => [
+    u.id, '<span class="mono">' + UI.esc(u.phone || u.username || '-') + '</span>', UI.esc(u.nickname || '-'),
+    u.plan ? UI.esc(u.plan) : '<span class="tag neutral">无套餐</span>', UI.esc(u.expire_at || '-'), u.online,
+    u.status === 1 ? '<span class="tag">正常</span>' : '<span class="tag bad">禁用</span>', UI.esc(u.created_at),
+    '<div class="actions"><button class="btn small secondary" onclick="subscribeUser(' + u.id + ')">开通套餐</button><button class="btn small ' + (u.status === 1 ? 'danger' : '') + '" onclick="toggleUser(' + u.id + ',' + u.status + ')">' + (u.status === 1 ? '禁用' : '启用') + '</button></div>'
+  ]), '完成门户登录后才会产生用户；白名单设备请到在线会话查看');
+  $('usersPager').innerHTML = UI.pager('users', state.usersPage, 20, r.total, 'loadUsers');
+}
+$('userSearch').onclick = () => loadUsers(1); $('userRefresh').onclick = () => loadUsers(state.usersPage);
+$('uq').onkeydown = e => { if (e.key === 'Enter') loadUsers(1); };
+async function toggleUser(id, status) {
+  const yes = await UI.confirm({title: status === 1 ? '禁用用户' : '恢复用户', text: status === 1 ? '禁用后，该用户的在线会话会立即结束。确认继续？' : '确认恢复该用户的正常状态？', okText: status === 1 ? '确认禁用' : '确认恢复', danger: status === 1});
+  if (!yes) return;
+  const r = await UI.post('/admin/api/users/' + id + '/toggle');
+  UI.toast(r.ok ? (r.status === 1 ? '用户已恢复' : '用户已禁用并踢下线') : (r.msg || '操作失败'), r.ok ? 'ok' : 'error');
+  if (r.ok) loadUsers(state.usersPage);
+}
+async function subscribeUser(id) {
+  const r = await UI.api('/admin/api/plans');
+  if (!r.ok) return UI.toast(r.msg || '套餐加载失败', 'error');
+  const plans = (r.rows || []).filter(p => p.status === 1);
+  if (!plans.length) return UI.toast('没有可开通的上架套餐，请先创建或上架套餐', 'warn');
+  openModal({title: '手动开通套餐 · 用户 #' + id,
+    body: '<div class="field"><label>选择套餐</label><select class="select" id="sub_plan">' + plans.map(p => '<option value="' + p.id + '">' + UI.esc(p.name) + ' · ' + UI.money(p.price) + '</option>').join('') + '</select><span class="help">开通后立即生效，不生成支付订单。</span></div>', okText: '确认开通',
+    onOk: async layer => {
+      const planId = Number(layer.querySelector('#sub_plan').value);
+      const res = await UI.post('/admin/api/users/' + id + '/subscribe', {plan_id: planId});
+      if (res.ok) { UI.toast(res.msg || '套餐已开通'); loadUsers(state.usersPage); return true; }
+      return res.msg || '开通失败';
+    }});
+}
+
+async function loadDevices() {
+  const r = await UI.api('/admin/api/devices');
+  if (!r.ok) return UI.toast(r.msg || '设备加载失败', 'error');
+  state.devices = r.rows || [];
+  $('devicesBox').innerHTML = UI.table(['ID', '网关 ID', '名称 / 位置', '状态', '最后心跳', '上报 IP', '负载', '操作'], state.devices.map(d => [
+    d.id, '<span class="mono">' + UI.esc(d.gw_id) + '</span>', '<strong>' + UI.esc(d.name || '-') + '</strong><br><span class="muted">' + UI.esc(d.location || '-') + '</span>',
+    (d.status === 1 ? '<span class="tag info">启用</span>' : '<span class="tag neutral">停用</span>') + ' ' + (d.online ? '<span class="tag">在线</span>' : '<span class="tag off">离线</span>'),
+    UI.esc(d.last_seen_at || '-'), '<span class="mono">' + UI.esc(d.last_ip || '-') + '</span>', UI.esc(d.sys_load || 0),
+    '<div class="actions"><button class="btn small secondary" onclick="editDevice(' + d.id + ')">编辑</button><button class="btn small danger" onclick="delDevice(' + d.id + ')">删除</button></div>'
+  ]), '新增网关后，请在路由器上填写相同的 Gateway ID');
+}
+$('deviceRefresh').onclick = loadDevices; $('deviceAdd').onclick = () => editDevice();
+function editDevice(id) {
+  const d = id ? state.devices.find(x => x.id === id) : null;
+  openModal({title: d ? '编辑网关 · ' + d.gw_id : '新增网关设备',
+    body: '<div class="form-grid"><div class="field full"><label>网关 ID</label><input class="input mono" id="d_gw" maxlength="64" value="' + (d ? UI.esc(d.gw_id) : '') + '" ' + (d ? 'disabled' : '') + ' placeholder="例如 shop01"><span class="help">仅允许字母、数字、点、下划线、短横线，最长 64 字符。</span></div><div class="field"><label>设备名称</label><input class="input" id="d_name" maxlength="128" value="' + (d ? UI.esc(d.name || '') : '') + '" placeholder="一号店网关"></div><div class="field"><label>安装位置</label><input class="input" id="d_loc" maxlength="255" value="' + (d ? UI.esc(d.location || '') : '') + '" placeholder="门店 / 楼层"></div><div class="field"><label>运行状态</label><select class="select" id="d_st"><option value="1">启用</option><option value="0">停用</option></select></div><div class="field full"><label>备注</label><input class="input" id="d_rem" maxlength="255" value="' + (d ? UI.esc(d.remark || '') : '') + '"></div></div>',
+    onOk: async layer => {
+      const gw = d ? d.gw_id : layer.querySelector('#d_gw').value.trim();
+      if (!gw) return '请填写网关 ID';
+      if (!/^[A-Za-z0-9_.-]{1,64}$/.test(gw)) return '网关 ID 格式不正确';
+      const r = await UI.post('/admin/api/devices', {gw_id: gw, name: layer.querySelector('#d_name').value, location: layer.querySelector('#d_loc').value, remark: layer.querySelector('#d_rem').value, status: Number(layer.querySelector('#d_st').value)});
+      if (r.ok) { UI.toast(d ? '设备已更新' : '设备已新增'); loadDevices(); return true; }
+      return r.msg || '保存失败';
+    }});
+  if (d) $('d_st').value = d.status;
+}
+async function delDevice(id) {
+  const d = state.devices.find(x => x.id === id); if (!d) return;
+  if (!await UI.confirm({title: '删除网关', text: '确认删除网关「' + d.gw_id + '」？删除不会清除历史订单和日志。', okText: '确认删除', danger: true})) return;
+  const r = await UI.del('/admin/api/devices/' + id);
+  UI.toast(r.ok ? '设备已删除' : (r.msg || '删除失败'), r.ok ? 'ok' : 'error'); if (r.ok) loadDevices();
+}
+
+async function loadPlans() {
+  const r = await UI.api('/admin/api/plans');
+  if (!r.ok) return UI.toast(r.msg || '套餐加载失败', 'error');
+  state.plans = r.rows || [];
+  const types = {time:'时长',flow:'流量',period:'包期',free:'免费'};
+  $('plansBox').innerHTML = UI.table(['ID', '套餐名称', '类型 / 价格', '时长 / 流量', '有效期', '设备 / 限速', '状态', '排序', '操作'], state.plans.map(p => [
+    p.id, '<strong>' + UI.esc(p.name) + '</strong>' + (p.description ? '<br><span class="muted">' + UI.esc(p.description) + '</span>' : ''),
+    (types[p.type] || UI.esc(p.type)) + '<br><span class="num">' + UI.money(p.price) + '</span>',
+    (p.duration_minutes ? p.duration_minutes + ' 分钟' : '不限时长') + '<br><span class="muted">' + (p.traffic_mb ? p.traffic_mb + ' MB' : '不限流量') + '</span>',
+    p.valid_days ? p.valid_days + ' 天' : '-', (p.device_limit || '不限') + ' 台<br><span class="muted">↑' + (p.speed_limit_up || '不限') + ' / ↓' + (p.speed_limit_down || '不限') + ' kbps</span>',
+    p.status === 1 ? '<span class="tag">上架</span>' : '<span class="tag off">下架</span>', p.sort,
+    '<div class="actions"><button class="btn small secondary" onclick="editPlan(' + p.id + ')">编辑</button><button class="btn small danger" onclick="delPlan(' + p.id + ')">删除</button></div>'
+  ]), '创建套餐后，用户即可在门户看到并购买');
+}
+$('planRefresh').onclick = loadPlans; $('planAdd').onclick = () => editPlan();
+function editPlan(id) {
+  const p = id ? state.plans.find(x => x.id === id) : null;
+  const val = (key, fallback = 0) => p && p[key] !== null && p[key] !== undefined ? p[key] : fallback;
+  openModal({title: p ? '编辑套餐 · ' + p.name : '新增套餐',
+    body: '<div class="form-grid"><div class="field full"><label>套餐名称</label><input class="input" id="p_name" maxlength="128" value="' + (p ? UI.esc(p.name) : '') + '" placeholder="例如 24 小时畅享"></div><div class="field"><label>套餐类型</label><select class="select" id="p_type"><option value="time">时长套餐</option><option value="flow">流量套餐</option><option value="period">包期套餐</option><option value="free">免费体验</option></select></div><div class="field"><label>价格（分）</label><input class="input" id="p_price" type="number" min="0" value="' + val('price') + '"><span class="help">100 分 = 1 元</span></div><div class="field"><label>时长（分钟）</label><input class="input" id="p_dur" type="number" min="0" value="' + val('duration_minutes') + '"><span class="help">0 = 不限</span></div><div class="field"><label>流量（MB）</label><input class="input" id="p_mb" type="number" min="0" value="' + val('traffic_mb') + '"><span class="help">0 = 不限</span></div><div class="field"><label>有效期（天）</label><input class="input" id="p_days" type="number" min="0" value="' + val('valid_days') + '"><span class="help">0 = 按套餐时长</span></div><div class="field"><label>同时在线设备数</label><input class="input" id="p_dev" type="number" min="0" value="' + val('device_limit') + '"><span class="help">0 = 不限</span></div><div class="field"><label>上行限速（kbps）</label><input class="input" id="p_up" type="number" min="0" value="' + val('speed_limit_up') + '"><span class="help">0 = 不限</span></div><div class="field"><label>下行限速（kbps）</label><input class="input" id="p_down" type="number" min="0" value="' + val('speed_limit_down') + '"><span class="help">0 = 不限</span></div><div class="field"><label>状态</label><select class="select" id="p_st"><option value="1">上架</option><option value="0">下架</option></select></div><div class="field"><label>排序</label><input class="input" id="p_sort" type="number" value="' + val('sort') + '"><span class="help">越大越靠前</span></div><div class="field full"><label>套餐说明</label><input class="input" id="p_desc" maxlength="500" value="' + (p ? UI.esc(p.description || '') : '') + '"></div></div>',
+    onOk: async layer => {
+      const g = id => layer.querySelector('#' + id);
+      const name = g('p_name').value.trim(); if (!name) return '请填写套餐名称';
+      const nums = ['p_price','p_dur','p_mb','p_days','p_dev','p_up','p_down'].map(id => Number(g(id).value || 0));
+      if (nums.some(n => !Number.isFinite(n) || n < 0)) return '价格、时长、流量、设备数和限速必须是非负数字';
+      const r = await UI.post('/admin/api/plans', {id: id || null, name, type: g('p_type').value, price: nums[0], duration_minutes: nums[1], traffic_mb: nums[2], valid_days: nums[3], device_limit: nums[4], speed_limit_up: nums[5], speed_limit_down: nums[6], status: Number(g('p_st').value), sort: Number(g('p_sort').value || 0), description: g('p_desc').value});
+      if (r.ok) { UI.toast(p ? '套餐已更新' : '套餐已创建'); loadPlans(); return true; }
+      return r.msg || '保存失败';
+    }});
+  if (p) { $('p_type').value = p.type; $('p_st').value = p.status; }
+}
+async function delPlan(id) {
+  const p = state.plans.find(x => x.id === id); if (!p) return;
+  if (!await UI.confirm({title: '删除套餐', text: '确认删除套餐「' + p.name + '」？有生效订阅或系统内置免费套餐会被服务端保护。', okText: '确认删除', danger: true})) return;
+  const r = await UI.del('/admin/api/plans/' + id);
+  UI.toast(r.ok ? '套餐已删除' : (r.msg || '删除失败'), r.ok ? 'ok' : 'error', r.ok ? 2500 : 5000); if (r.ok) loadPlans();
+}
+
+async function loadOrders(page = 1) {
+  state.ordersPage = Math.max(1, page);
+  const r = await UI.api('/admin/api/orders?status=' + $('ostatus').value + '&page=' + state.ordersPage + '&size=20');
+  if (!r.ok) return UI.toast(r.msg || '订单加载失败', 'error');
+  state.orders = r.rows || [];
+  const names = ['待支付','已支付','已关闭','已退款'], cls = ['off','','neutral','info'];
+  $('ordersBox').innerHTML = UI.table(['ID', '订单号', '手机号', '套餐 / 金额', '状态', '支付', '下单 / 支付时间', '操作'], state.orders.map(o => [
+    o.id, '<span class="mono">' + UI.esc(o.order_no) + '</span>', '<span class="mono">' + UI.esc(o.phone || '-') + '</span>',
+    UI.esc(o.plan_name) + '<br><strong>' + UI.money(o.amount) + '</strong>', '<span class="tag ' + cls[o.status] + '">' + names[o.status] + '</span>',
+    UI.esc(o.pay_type || '-'), UI.esc(o.created_at) + '<br><span class="muted">' + UI.esc(o.paid_at || '未支付') + '</span>',
+    o.status === 1 ? '<button class="btn small warn" onclick="refundOrder(' + o.id + ')">退款登记</button>' : (o.refund_reason ? UI.esc(o.refund_reason) : '-')
+  ]), '当前筛选条件下没有订单');
+  $('ordersPager').innerHTML = UI.pager('orders', state.ordersPage, 20, r.total, 'loadOrders');
+}
+$('ostatus').onchange = () => loadOrders(1); $('orderRefresh').onclick = () => loadOrders(state.ordersPage);
+function refundOrder(id) {
+  const order = state.orders.find(o => o.id === id); if (!order) return;
+  openModal({title: '退款登记 · ' + order.order_no, danger: true, okText: '确认退款并停用套餐',
+    body: '<div class="notice warn">此操作会撤销订单并立即停用该订单开通的套餐。支付宝 / 微信的真实资金退回需要在对应渠道后台单独完成。</div><div class="field"><label>退款原因</label><input class="input" id="r_reason" maxlength="250" value="用户申请退款"></div><label class="check"><input id="r_channel" type="checkbox"><span>我已在支付宝 / 微信渠道后台完成真实退款，此处仅做登记（mock 订单无需勾选）</span></label>',
+    onOk: async layer => {
+      const r = await UI.post('/admin/api/orders/' + id + '/refund', {reason: layer.querySelector('#r_reason').value, channel_refunded: layer.querySelector('#r_channel').checked});
+      if (r.ok) { UI.toast(r.msg || '退款已登记'); loadOrders(state.ordersPage); return true; }
+      return r.msg || '退款失败';
+    }});
+}
+
+async function loadSessions() {
+  const r = await UI.api('/admin/api/sessions');
+  if (!r.ok) return UI.toast(r.msg || '会话加载失败', 'error');
+  state.sessions = r.rows || [];
+  $('sessionsBox').innerHTML = UI.table(['ID', '用户', '网关', 'MAC / IP', '开始时间', '最后活跃', '下行 / 上行', '操作'], state.sessions.map(s => [
+    s.id, UI.esc(s.phone || '-'), UI.esc(s.gw_id), '<span class="mono">' + UI.esc(s.mac || '-') + '<br>' + UI.esc(s.ip || '-') + '</span>',
+    UI.esc(s.start_at), UI.esc(s.last_update_at), UI.bytes(s.incoming) + ' / ' + UI.bytes(s.outgoing),
+    '<div class="actions"><button class="btn small secondary" onclick="kickSession(' + s.id + ',false)">踢下线</button><button class="btn small danger" onclick="kickSession(' + s.id + ',true)">踢线并拉黑</button></div>'
+  ]), '暂无在线终端；白名单设备也会在这里显示');
+}
+$('sessionRefresh').onclick = loadSessions;
+async function kickSession(id, block) {
+  const s = state.sessions.find(x => x.id === id); if (!s) return;
+  if (!await UI.confirm({title: block ? '踢线并加入黑名单' : '踢终端下线', text: block ? '将结束会话并拉黑 ' + (s.mac || '该设备') + '，设备之后无法重新认证。确认继续？' : '仅结束当前会话，设备之后仍可重新认证。确认继续？', okText: block ? '踢线并拉黑' : '仅踢下线', danger: block})) return;
+  const r = await UI.post('/admin/api/sessions/' + id + '/kick', {block});
+  UI.toast(r.msg || (r.ok ? '已踢下线' : '操作失败'), r.ok ? 'ok' : 'error'); if (r.ok) loadSessions();
+}
+
+async function loadWl() {
+  const [macs, ips, blacks] = await Promise.all([UI.api('/admin/api/whitelist'), UI.api('/admin/api/ipwhitelist'), UI.api('/admin/api/blacklist')]);
+  if (macs.ok) $('wlBox').innerHTML = UI.table(['ID', 'MAC 地址', '备注', '操作'], (macs.rows || []).map(w => [w.id, '<span class="mono">' + UI.esc(w.mac) + '</span>', UI.esc(w.note || '-'), '<button class="btn small danger" onclick="delMac(' + w.id + ')">删除</button>']), '暂无 MAC 白名单');
+  else UI.toast(macs.msg || 'MAC 白名单加载失败', 'error');
+  if (ips.ok) $('ipwlBox').innerHTML = UI.table(['ID', 'IP / 网段', '备注', '操作'], (ips.rows || []).map(w => [w.id, '<span class="mono">' + UI.esc(w.cidr) + '</span>', UI.esc(w.note || '-'), '<button class="btn small danger" onclick="delIp(' + w.id + ')">删除</button>']), '暂无 IP 白名单');
+  else UI.toast(ips.msg || 'IP 白名单加载失败', 'error');
+  if (blacks.ok) $('blBox').innerHTML = UI.table(['ID', 'MAC 地址', '备注', '拉黑时间', '操作'], (blacks.rows || []).map(w => [w.id, '<span class="mono">' + UI.esc(w.mac) + '</span>', UI.esc(w.note || '-'), UI.esc(w.created_at), '<button class="btn small secondary" onclick="delBlack(' + w.id + ')">解除拉黑</button>']), '暂无黑名单设备');
+  else UI.toast(blacks.msg || '黑名单加载失败', 'error');
+}
+function macModal(type) {
+  const black = type === 'black';
+  openModal({title: black ? '拉黑 MAC 地址' : '添加 MAC 白名单', danger: black, okText: black ? '确认拉黑' : '确认添加',
+    body: '<div class="field"><label>MAC 地址</label><input class="input mono" id="m_mac" placeholder="00:11:22:33:44:55" maxlength="17"><span class="help">支持冒号或短横线分隔，服务端统一转为小写。</span></div><div class="field"><label>备注</label><input class="input" id="m_note" maxlength="255" placeholder="' + (black ? '拉黑原因' : '设备用途') + '"></div>',
+    onOk: async layer => {
+      const mac = layer.querySelector('#m_mac').value.trim(); if (!mac) return '请填写 MAC 地址';
+      const r = await UI.post(black ? '/admin/api/blacklist' : '/admin/api/whitelist', {mac, note: layer.querySelector('#m_note').value});
+      if (r.ok) { UI.toast(black ? '已加入黑名单' : '已加入白名单'); loadWl(); return true; }
+      return r.msg || '添加失败';
+    }});
+}
+$('macAdd').onclick = () => macModal('white'); $('blackAdd').onclick = () => macModal('black');
+$('ipAdd').onclick = () => openModal({title: '添加 IP 免认证',
+  body: '<div class="field"><label>IP 或 CIDR 网段</label><input class="input mono" id="i_cidr" placeholder="192.168.6.100 或 192.168.6.0/24"><span class="help">网段会标准化，重复或被覆盖的范围会被拒绝。</span></div><div class="field"><label>备注</label><input class="input" id="i_note" maxlength="255" placeholder="有线办公区"></div>',
+  onOk: async layer => {
+    const cidr = layer.querySelector('#i_cidr').value.trim(); if (!cidr) return '请填写 IP 或网段';
+    const r = await UI.post('/admin/api/ipwhitelist', {cidr, note: layer.querySelector('#i_note').value});
+    if (r.ok) { UI.toast('IP 白名单已添加：' + r.cidr); loadWl(); return true; }
+    return r.msg || '添加失败';
+  }});
+async function removeRule(kind, id) {
+  const meta = {mac: ['whitelist', '删除 MAC 白名单'], ip: ['ipwhitelist', '删除 IP 白名单'], black: ['blacklist', '解除 MAC 黑名单']}[kind];
+  if (!await UI.confirm({title: meta[1], text: '确认执行该操作？规则变更会立即影响后续认证。', okText: '确认', danger: kind !== 'black'})) return;
+  const r = await UI.del('/admin/api/' + meta[0] + '/' + id);
+  UI.toast(r.ok ? '操作已完成' : (r.msg || '操作失败'), r.ok ? 'ok' : 'error'); if (r.ok) loadWl();
+}
+const delMac = id => removeRule('mac', id), delIp = id => removeRule('ip', id), delBlack = id => removeRule('black', id);
+
+async function loadLogs(page = 1) {
+  state.logsPage = Math.max(1, page);
+  const r = await UI.api('/admin/api/logs?page=' + state.logsPage + '&size=30');
+  if (!r.ok) return UI.toast(r.msg || '日志加载失败', 'error');
+  const actions = {login:'登录',logout:'下线',denied:'拒绝',pay:'支付',refund:'退款',device_auto:'自动识别',device_bind:'设备绑定',device_rebind:'设备换绑'};
+  $('logsBox').innerHTML = UI.table(['ID', '用户', '网关', 'MAC / IP', '动作', '结果', '原因', '时间'], (r.rows || []).map(l => [
+    l.id, UI.esc(l.phone || '-'), UI.esc(l.gw_id || '-'), '<span class="mono">' + UI.esc(l.mac || '-') + '<br>' + UI.esc(l.ip || '-') + '</span>',
+    actions[l.action] || UI.esc(l.action), l.result === 'success' || l.result === 'ok' ? '<span class="tag">成功</span>' : '<span class="tag bad">失败</span>', UI.esc(l.reason || '-'), UI.esc(l.created_at)
+  ]), '暂无认证日志');
+  $('logsPager').innerHTML = UI.pager('logs', state.logsPage, 30, r.total, 'loadLogs');
+}
+$('logRefresh').onclick = () => loadLogs(state.logsPage);
+
+async function loadSettings() {
+  const r = await UI.api('/admin/api/settings');
+  if (!r.ok) return UI.toast(r.msg || '设置加载失败', 'error');
+  const s = r.settings || {}, c = r.channels || {};
+  $('set_run_mode').value = s.run_mode || 'test'; $('set_site_name').value = s.site_name || '';
+  $('set_free').value = s.free_trial_minutes || '0'; $('set_limit').value = s.default_device_limit || '0';
+  $('set_notice').value = s.site_notice || ''; $('noticeCount').textContent = $('set_notice').value.length;
+  $('channels').innerHTML = [
+    ['短信通道', c.sms_provider || '-', c.sms_ready, c.sms_ready ? '参数已配置' : '未配置 / 将回退 mock'],
+    ['支付通道', c.pay_provider || '-', c.pay_ready, c.pay_ready ? '参数已配置' : '未配置 / 正式模式不可收款'],
+    ['当前模式', s.run_mode === 'production' ? 'PRODUCTION' : 'TEST', true, s.run_mode === 'production' ? '真实通道' : '模拟通道']
+  ].map(ch => '<div class="channel"><div><strong>' + ch[0] + '</strong><div class="muted" style="font-size:11px">' + UI.esc(ch[1]) + ' · ' + ch[3] + '</div></div><span class="tag ' + (ch[2] ? '' : 'off') + '">' + (ch[2] ? '就绪' : '待配置') + '</span></div>').join('');
+}
+$('channelRefresh').onclick = loadSettings;
+$('set_notice').oninput = () => $('noticeCount').textContent = $('set_notice').value.length;
+$('settingsSave').onclick = async function() {
+  if (this.dataset.busy === '1') return;
+  const free = Number($('set_free').value), limit = Number($('set_limit').value);
+  if (!Number.isInteger(free) || free < 0 || free > 100000) return UI.toast('免费体验分钟数应为 0–100000 的整数', 'error');
+  if (!Number.isInteger(limit) || limit < 0 || limit > 100) return UI.toast('默认设备数应为 0–100 的整数', 'error');
+  UI.busy(this, true, '正在保存…');
+  const r = await UI.post('/admin/api/settings', {run_mode: $('set_run_mode').value, site_name: $('set_site_name').value.trim(), free_trial_minutes: free, default_device_limit: limit, site_notice: $('set_notice').value});
+  UI.busy(this, false); UI.toast(r.ok ? '设置已保存并立即生效' : (r.msg || '保存失败'), r.ok ? 'ok' : 'error');
+  if (r.ok) loadSettings();
+};
+$('passwordSave').onclick = async function() {
+  if (this.dataset.busy === '1') return;
+  const oldPassword = $('pwd_old').value, newPassword = $('pwd_new').value, confirm = $('pwd_confirm').value;
+  if (!oldPassword) return UI.toast('请输入原密码', 'error');
+  if (newPassword.length < 8) return UI.toast('新密码至少 8 位', 'error');
+  if (newPassword !== confirm) return UI.toast('两次输入的新密码不一致', 'error');
+  if (newPassword === oldPassword) return UI.toast('新密码不能与原密码相同', 'warn');
+  UI.busy(this, true, '正在修改…');
+  const r = await UI.post('/admin/api/admin/password', {old_password: oldPassword, new_password: newPassword});
+  UI.busy(this, false);
+  if (r.ok) { $('pwd_old').value = $('pwd_new').value = $('pwd_confirm').value = ''; UI.toast('密码已修改，下次登录请使用新密码'); }
+  else UI.toast(r.msg || '修改失败', 'error');
+};
+
+$('logoutBtn').onclick = async function() {
+  if (!await UI.confirm({title: '退出控制台', text: '确认退出当前管理员账号？', okText: '退出登录'})) return;
+  UI.busy(this, true, '正在退出…'); await UI.post('/admin/api/logout'); location.href = '/admin/login';
+};
+
+setInterval(() => { $('clock').textContent = new Date().toLocaleString('zh-CN', {hour12:false}); }, 1000);
+window.addEventListener('hashchange', () => switchPage(location.hash.slice(1), false));
+(async function init(){
+  const r = await UI.api('/admin/api/me');
+  if (!r.ok) return;
+  $('who').textContent = r.username; $('avatar').textContent = (r.username || 'A').charAt(0).toUpperCase();
+  switchPage(location.hash.slice(1) || 'dash', false);
+})();
+</script>
+</body>
+</html>

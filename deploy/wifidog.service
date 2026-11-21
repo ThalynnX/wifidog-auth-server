@@ -1,0 +1,29 @@
+[Unit]
+Description=WiFiDog Captive Portal (FastAPI)
+Documentation=https://github.com/your-account/wifidog-auth-server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wifidog
+Group=wifidog
+WorkingDirectory=/opt/wifidog
+EnvironmentFile=-/opt/wifidog/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/wifidog/venv/bin/python -m gunicorn -c /opt/wifidog/gunicorn_conf.py app.main:app
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=40
+
+# 基础加固（如遇权限问题可先注释）
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/wifidog/data /opt/wifidog/logs
+
+[Install]
+WantedBy=multi-user.target
