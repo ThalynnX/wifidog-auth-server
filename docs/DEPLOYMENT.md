@@ -183,7 +183,9 @@ curl -s "http://127.0.0.1:8000/wifidog/ping?gw_id=test&sys_uptime=1&sys_memfree=
 
 按 `Ctrl+C` 停止前台进程，继续配置守护。
 
-> 首次启动会自动：建 14 张表 → 补字段迁移 → 创建管理员 `admin/admin123` → 写入 4 个示例套餐。
+> 首次启动会自动：建 15 张表 → 补字段迁移 → 创建管理员 `admin/admin123` → 写入 4 个示例套餐。
+>
+> 仓库不附带生产库 `data/wifidog.db`。数据库结构见 [`DATABASE.md`](DATABASE.md)，纯 SQLite DDL 见 [`schema.sql`](schema.sql)；空库可手工执行 `sqlite3 data/wifidog.db < docs/schema.sql`，正常部署直接启动应用即可。
 
 ---
 

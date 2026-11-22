@@ -109,6 +109,7 @@
 
 - 单文件 SQLite（WAL 模式）开箱即用，也可切换 MySQL/MariaDB
 - 启动时**自动建表与轻量迁移**，升级不需手工改表
+- 仓库提供 [`docs/schema.sql`](docs/schema.sql) 纯结构 DDL（15 张表，不含任何业务数据），生产库 `data/*.db` 不入库
 - 管理端 JWT + HttpOnly Cookie，支持 `x-admin-token` 头调用
 - 防爆破：验证码 5 次错误作废；登录按 IP/手机号限流；管理员失败 5 次锁 IP 10 分钟
 - 短信与支付密钥只从 `.env` 读取，不落数据库
@@ -556,7 +557,7 @@ wifidog-auth-server/
 │   ├── main.py              # FastAPI 入口、启动建表与种子数据、定时巡检
 │   ├── config.py            # 环境变量与默认值
 │   ├── database.py          # SQLAlchemy 引擎/会话（SQLite WAL / MySQL）
-│   ├── models.py            # 14 张数据表
+│   ├── models.py            # 15 张数据表
 │   ├── security.py          # 密码哈希、JWT 签发校验
 │   ├── services_auth.py     # 认证核心：套餐校验、放行/拒绝判定
 │   ├── device_auth.py       # 设备绑定、换绑、设备数限制
@@ -579,6 +580,8 @@ wifidog-auth-server/
 │   └── nginx_wifidog.conf   # Nginx 站点模板
 ├── docs/
 │   ├── DEPLOYMENT.md        # 从 0 部署（命令级）
+│   ├── DATABASE.md          # 15 张表结构与初始化说明
+│   ├── schema.sql           # SQLite 纯结构 DDL（无数据）
 │   ├── ROUTER_SETUP.md      # 路由器型号/模式/设置/排障
 │   ├── ARCHITECTURE.md      # 架构与数据模型
 │   ├── API.md               # 网关协议 + 客户端 + 管理 API
