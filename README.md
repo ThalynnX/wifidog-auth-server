@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688)](https://fastapi.tiangolo.com/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.0.1-orange)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v2.0.2-orange)](CHANGELOG.md)
 
 </div>
 
@@ -528,7 +528,15 @@ ClientTimeout 10
 | 认证日志 | 登录、认证、计费、踢线、失败原因 |
 | 系统设置 | 运行模式、站点名称、公告、免费时长、设备数、修改密码 |
 
-### v2.0.1 安全回跳修复（当前）
+### v2.0.2 实时数据一致性与多 worker（当前）
+
+- 在线判定统一为“最近 120 秒有网关上报”，踢线/退款/禁用后的旧 token 不会复活。
+- 新增 Redis Pub/Sub WS 总线，后台统计、设备在线和门户状态在多 worker 下保持一致。
+- 后台 9 个页面、门户套餐/成功页/模拟支付页按 3–5 秒同步，动态页面与 API 禁止缓存。
+- 网关统计密钥改为 `WIFIDOG_GWSTATS_KEY` 环境变量，仓库不保存真实密钥。
+- 新增 `docs/schema.sql` 与 `docs/DATABASE.md`：15 张表结构可直接审计，空库可手工初始化；生产库本身不入库。
+
+### v2.0.1 安全回跳修复
 
 - 认证成功页“继续访问”只允许回跳公网 `http/https` 原页面；网关地址、私网、回环、`.local` 主机名和系统联网检测页全部拒绝。
 - 网关只提供路由器根地址或没有可恢复的合法原页面时，不再跳转，按钮改为“认证已完成，可直接上网”并给出提示。
@@ -586,6 +594,8 @@ wifidog-auth-server/
 │   ├── ARCHITECTURE.md      # 架构与数据模型
 │   ├── API.md               # 网关协议 + 客户端 + 管理 API
 │   └── FAQ.md               # 常见问题
+├── scripts/
+│   └── build_release.py     # 从当前提交重建 server/full 下载包与 SHA256
 ├── tests/                   # 接口、Chromium、弹窗与数据库落盘验收
 ├── router-packages/         # 路由器端安装包（apk / libs / LuCI）
 ├── data/                    # SQLite 数据库与密钥（运行时生成，已忽略）
@@ -654,23 +664,25 @@ tar czf /backup/wifidog-conf-$(date +%F).tar.gz /opt/wifidog/.env
 
 ## 15. 下载与版本
 
-### 当前版本：v2.0.1（修复成功后误跳路由器管理页）
+### 当前版本：v2.0.2（实时数据一致性与多 worker）
 
-本次更新：成功页不再无条件跳转 `url` 参数。只有合法公网 HTTP/HTTPS 页面才允许回跳；网关地址、内网地址、回环地址、`.local` 主机名和手机系统联网检测页会被拦截。没有合法原页面时留在成功页并提示直接打开浏览器，不再进入路由器管理后台。
+本次更新：在线判定统一按网关最近 120 秒上报；踢线、退款、禁用后的旧 token 不再复活；新增 Redis WS 总线支持多 worker；后台与门户关键页面 3–5 秒实时同步；网关统计密钥改为环境变量；新增 `docs/schema.sql` 与 `docs/DATABASE.md`，15 张表结构可审计、可空库初始化。
 
-最新 Release：[v2.0.1 下载与更新说明](https://github.com/your-account/wifidog-auth-server/releases/tag/v2.0.1)
+最新 Release：[v2.0.2 下载与更新说明](https://github.com/your-account/wifidog-auth-server/releases/tag/v2.0.2)
 
 | 资产 | 内容 |
 |---|---|
-| `wifidog-portal-v2.0.1-full.tar.gz` | **完整源码包**：服务端代码 + 部署脚本 + 全部文档 + 验收脚本 + 路由器包 |
-| `wifidog-portal-v2.0.1-server.tar.gz` | 仅服务端源码、部署文档与验收脚本（不含路由器二进制包） |
-| `wifidog-portal-v2.0.1-acceptance.tar.gz` | 跳转专项报告、回归结果、日志及桌面/手机截图 |
+| `wifidog-portal-v2.0.2-full.tar.gz` | **完整源码包**：服务端代码 + 部署脚本 + 全部文档 + 数据库结构 + 验收脚本 + 路由器包 |
+| `wifidog-portal-v2.0.2-server.tar.gz` | 仅服务端源码、部署文档、数据库结构与验收脚本（不含路由器二进制包） |
+| `RELEASE-NOTES-v2.0.2.md` | 本版本更新内容、部署顺序与验收边界 |
 | `apfree-wifidog-*.apk` | 路由器 wifidogx 主程序（沿用已验证版本） |
 | `luci-app-apfree-wifidog-*.apk` | LuCI 配置界面（沿用已验证版本） |
 | `luci-i18n-apfree-wifidog-zh-cn-*.apk` | 中文语言包（沿用已验证版本） |
 | `apfree-wifidog-libs-aarch64.tar.gz` | 依赖库（沿用已验证版本） |
 | `apfree-wifidog-luci-full-aarch64.tar.gz` | 含 wifidogx/wdctlx/init.d/配置模板的全量包（沿用已验证版本） |
 | `SHA256SUMS.txt` | 本 Release 全部下载资产的 SHA256 校验和 |
+
+> 本次未单独发布 `acceptance` 打包资产；接口/CI 检查结果与已知验收边界见 `CHANGELOG.md` 和 `RELEASE-NOTES-v2.0.2.md`。
 
 下载后校验：
 

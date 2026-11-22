@@ -1,4 +1,4 @@
-/* WiFidog Unified Console helpers · v2.0.1 */
+/* WiFidog Unified Console helpers · v2.0.2 */
 (function () {
   'use strict';
 

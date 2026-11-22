@@ -101,7 +101,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=SITE_NAME,
     description="wifidog 认证计费服务端",
-    version="2.0.1",
+    version="2.0.2",
     lifespan=lifespan,
     # API 文档仅在 DEBUG 模式暴露，生产关闭（防接口结构泄露）
     docs_url="/docs" if DEBUG else None,

@@ -80,8 +80,8 @@ git log -1 --oneline
 
 ```bash
 cd /tmp
-wget https://github.com/your-account/wifidog-auth-server/releases/download/v1.1.2/wifidog-portal-v1.1.2-full.tar.gz
-tar -xzf wifidog-portal-v1.1.2-full.tar.gz -C /opt/wifidog --strip-components=1
+wget https://github.com/your-account/wifidog-auth-server/releases/download/v2.0.2/wifidog-portal-v2.0.2-full.tar.gz
+tar -xzf wifidog-portal-v2.0.2-full.tar.gz -C /opt/wifidog --strip-components=1
 ```
 
 确认目录结构：
