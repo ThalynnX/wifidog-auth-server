@@ -15,7 +15,7 @@
       <div class="brand-mark"><svg viewBox="0 0 24 24"><path d="M4 17a11 11 0 0 1 16 0M7 13.5a7 7 0 0 1 10 0M10.2 10.2a3 3 0 0 1 3.6 0"/><circle cx="12" cy="19" r="1"/></svg></div>
       <div><div class="brand-name">{{ site_name }}</div><div class="brand-sub">Smart Network Access</div></div>
     </div>
-    <div class="portal-status"><i class="live-dot"></i>PORTAL ONLINE</div>
+    <div class="portal-status"><i class="live-dot" id="portalStatusDot"></i><span id="portalStatusText">PORTAL ONLINE</span></div>
   </div>
 
   <section class="portal-card">
@@ -48,6 +48,10 @@
         <button class="btn block" id="pwdLoginBtn" type="submit">登录并连接网络</button>
         <div class="form-msg" id="pwdMsg" role="status" aria-live="polite"></div>
       </form>
+      {% if alipay_ready %}
+      <button class="btn secondary block" id="alipayLogin" type="button" style="margin-top:12px">支付宝授权登录</button>
+      <div class="form-msg" id="alipayMsg" role="status" aria-live="polite"></div>
+      {% endif %}
     </div>
 
     <form id="rebindArea" class="hide" novalidate>
@@ -100,6 +104,16 @@
     $('smsTab').setAttribute('aria-selected',sms); $('pwdTab').setAttribute('aria-selected',!sms);
   }
   $('smsTab').onclick=()=>selectTab('sms'); $('pwdTab').onclick=()=>selectTab('pwd');
+
+  const alipayBtn=$('alipayLogin');
+  if(alipayBtn) alipayBtn.onclick=function(){
+    const qs=new URLSearchParams();
+    Object.keys(params).forEach(key=>{ if(params[key]) qs.set(key,params[key]); });
+    const phone=$('phone').value.trim();
+    if(/^1\d{10}$/.test(phone)) qs.set('phone',phone);
+    say('alipayMsg','正在跳转支付宝授权…','info');
+    location.href='/portal/alipay/oauth/start?'+qs.toString();
+  };
 
   function showRebind(show){
     $('authArea').classList.toggle('hide',show); $('rebindArea').classList.toggle('hide',!show);
@@ -173,6 +187,19 @@
     if(r.ok){saveSession(r.token||'',r.phone||'');box.textContent=r.msg||'设备已识别，正在自动放行';setTimeout(()=>location.href=successUrl(r.token||''),500);}
     else box.classList.add('hide');
   }
+  async function checkHealth(){
+    try{
+      const r=await fetch('/healthz',{cache:'no-store'});
+      const j=await r.json();
+      const ok=r.ok&&j.ok;
+      $('portalStatusText').textContent=ok?'PORTAL ONLINE':(j.db===false||j.redis===false?'PORTAL DEGRADED':'PORTAL OFFLINE');
+      $('portalStatusDot').style.background=ok?'var(--green)':(j.db===false||j.redis===false?'var(--amber)':'var(--red)');
+    }catch(e){
+      $('portalStatusText').textContent='PORTAL OFFLINE';
+      $('portalStatusDot').style.background='var(--red)';
+    }
+  }
+  checkHealth();setInterval(checkHealth,5000);
   autoDevice();
 })();
 </script>

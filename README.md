@@ -681,4 +681,4 @@ sha256sum -c SHA256SUMS.txt
 
 ## License
 
-[MIT](LICENSE) © 2026 your-account
+[MIT](LICENSE) © 2026 WiFiDog Auth Server contributors

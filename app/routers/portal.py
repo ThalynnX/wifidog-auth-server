@@ -7,7 +7,12 @@
 - 真实支付通过带验签/解密的回调端点确认，并核对订单金额。
 - /me 仅支持 token 查询，不再支持纯手机号（P2-9）。
 """
+import hashlib
+import json
+import logging
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -15,17 +20,21 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from .. import payment, ratelimit, realtime, services_auth as svc, sms, settings_store
-from ..config import SMS_CODE_EXPIRE, SMS_DAILY_LIMIT, SMS_IP_HOURLY_LIMIT
+from .. import alipay, payment, ratelimit, realtime, services_auth as svc, sms, settings_store
+from ..config import (
+    ALIPAY_APPID, ALIPAY_RETURN_URL, ALIPAY_SELLER_ID,
+    SMS_CODE_EXPIRE, SMS_DAILY_LIMIT, SMS_IP_HOURLY_LIMIT,
+)
 from ..database import get_db
-from ..models import Order, Plan, SmsCode, Session as Sess, User
+from ..models import Order, PaymentEvent, Plan, SmsCode, Session as Sess, User
 from ..routers.wifidog import build_gateway_redirect, issue_token, push_client_allow
-from ..security import verify_password
+from ..security import make_signed_token, parse_signed_token, verify_password
 from ..templates_env import templates
 
 from app import device_auth  # 设备(MAC)绑定
 
 router = APIRouter(prefix="/portal", tags=["portal"])
+logger = logging.getLogger("wifidog.portal")
 
 CODE_MAX_ATTEMPTS = 5      # 单个验证码最大失败次数，超限作废
 LOGIN_IP_LIMIT = (30, 600)       # 每 IP 10 分钟最多 30 次登录尝试
@@ -174,24 +183,44 @@ async def login(data: LoginIn, request: Request, db: Session = Depends(get_db)):
                       ip=ip, mac=data.mac, reason=dev_code)
     # MAC 白名单：免套餐直接放行（例如自家设备、合作商户设备）
     if data.mac and svc.is_mac_whitelisted(db, data.mac):
-        token = issue_token(db, user.id, data.gw_id, data.mac)
+        sess = svc.active_session_for_device(db, user.id, data.mac)
+        token = sess.token if sess else issue_token(db, user.id, data.gw_id, data.mac)
+        sess = sess or db.query(Sess).filter(Sess.token == token).first()
+        sent = 0
         try:
-            await push_client_allow(data.mac, data.ip, data.gw_id, token)
+            sent = await push_client_allow(data.mac, data.ip, data.gw_id, token)
         except Exception:  # noqa: BLE001
             logger.exception("推送 allow 失败（白名单）")
-        svc.write_log(db, "login", "ok", phone=phone, gw_id=data.gw_id,
-                      ip=ip, mac=data.mac, reason="mac_whitelisted")
+        if sess:
+            if sent:
+                sess.status = 1
+                sess.stop_at = None
+                sess.last_update_at = datetime.now()
+                db.commit()
+            svc.mark_authenticated(db, sess, "login", user_id=user.id, phone=phone,
+                                  gw_id=data.gw_id, mac=data.mac, ip=ip, reason="mac_whitelisted")
         return JSONResponse({"ok": True, "redirect": "", "token": token, "whitelisted": True})
 
     ok, reason, _sub = svc.check_access(db, user, exclude_mac=(data.mac or ""))
     if not ok:
         return JSONResponse({"ok": False, "msg": reason, "need_buy": True, "phone": phone})
 
-    token = issue_token(db, user.id, data.gw_id, data.mac)
+    sess = svc.active_session_for_device(db, user.id, data.mac)
+    token = sess.token if sess else issue_token(db, user.id, data.gw_id, data.mac)
+    sess = sess or db.query(Sess).filter(Sess.token == token).first()
+    sent = 0
     try:
-        await push_client_allow(data.mac, data.ip, data.gw_id, token)
+        sent = await push_client_allow(data.mac, data.ip, data.gw_id, token)
     except Exception:  # noqa: BLE001
         logger.exception("推送 allow 失败")
+    if sess:
+        if sent:
+            sess.status = 1
+            sess.stop_at = None
+            sess.last_update_at = datetime.now()
+            db.commit()
+        svc.mark_authenticated(db, sess, "login", user_id=user.id, phone=phone,
+                              gw_id=data.gw_id, mac=data.mac, ip=ip, reason="portal_login")
     # 云模式放行已由 WebSocket 下发完成，不再跳网关 /wifidog/auth
     return JSONResponse({"ok": True, "redirect": "", "token": token})
 
@@ -221,12 +250,20 @@ async def device_rebind(data: RebindIn, request: Request, db: Session = Depends(
 
     token = issue_token(db, user.id, data.gw_id, data.mac)
     ip = data.ip or _ip(request)
+    sent = 0
     try:
-        await push_client_allow(data.mac, ip, data.gw_id, token)
+        sent = await push_client_allow(data.mac, ip, data.gw_id, token)
     except Exception:  # noqa: BLE001
         logger.exception("推送 allow 失败（换设备）")
-    svc.write_log(db, "device_rebind", "ok", user_id=user.id, phone=phone,
-                  gw_id=data.gw_id, ip=ip, mac=data.mac, reason=msg)
+    sess = db.query(Sess).filter(Sess.token == token).first()
+    if sess:
+        if sent:
+            sess.status = 1
+            sess.stop_at = None
+            sess.last_update_at = datetime.now()
+            db.commit()
+        svc.mark_authenticated(db, sess, "device_rebind", user_id=user.id, phone=phone,
+                              gw_id=data.gw_id, mac=data.mac, ip=ip, reason=msg)
     return JSONResponse({"ok": True, "msg": "已更换绑定设备，现在可以直接上网了", "token": token})
 
 
@@ -252,21 +289,32 @@ async def device_auto(data: AutoIn, request: Request, db: Session = Depends(get_
     ok, reason, _sub = svc.check_access(db, user, exclude_mac=mac)
     if not ok:
         return JSONResponse({"ok": False, "msg": reason})
-    token = issue_token(db, user.id, data.gw_id, mac)
+
     ip = data.ip or _ip(request)
+    sess = svc.active_session_for_device(db, user.id, mac)
+    token = sess.token if sess else issue_token(db, user.id, data.gw_id, mac)
+    sess = sess or db.query(Sess).filter(Sess.token == token).first()
+    sent = 0
     try:
-        await push_client_allow(mac, ip, data.gw_id, token)
+        sent = await push_client_allow(mac, ip, data.gw_id, token)
     except Exception:  # noqa: BLE001
         logger.exception("推送 allow 失败（自动识别）")
-    svc.write_log(db, "device_auto", "ok", user_id=user.id, phone=user.phone or "",
-                  gw_id=data.gw_id, ip=ip, mac=mac, reason="known device")
+    if sess:
+        if sent:
+            sess.status = 1
+            sess.stop_at = None
+            sess.last_update_at = datetime.now()
+            db.commit()
+        svc.mark_authenticated(db, sess, "device_auto", user_id=user.id,
+                              phone=user.phone or "", gw_id=data.gw_id, mac=mac, ip=ip,
+                              reason="known_device")
     return JSONResponse({"ok": True, "msg": "已识别已认证设备，正在自动放行",
                          "phone": (user.phone or "")[:3] + "****" + (user.phone or "")[-4:],
                          "token": token})
 
 
 @router.post("/api/password_login")
-def password_login(data: PwdLoginIn, request: Request, db: Session = Depends(get_db)):
+async def password_login(data: PwdLoginIn, request: Request, db: Session = Depends(get_db)):
     ip = _ip(request)
     if not ratelimit.check(f"pwdlogin:ip:{ip}", 10, 600):
         return JSONResponse({"ok": False, "msg": "尝试过于频繁，请稍后再试"})
@@ -278,6 +326,20 @@ def password_login(data: PwdLoginIn, request: Request, db: Session = Depends(get
     if not ok:
         return JSONResponse({"ok": False, "msg": reason, "need_buy": True})
     token = issue_token(db, user.id, data.gw_id, data.mac)
+    sent = 0
+    try:
+        sent = await push_client_allow(data.mac, ip, data.gw_id, token)
+    except Exception:  # noqa: BLE001
+        logger.exception("推送 allow 失败（账号密码登录）")
+    sess = db.query(Sess).filter(Sess.token == token).first()
+    if sess:
+        if sent:
+            sess.status = 1
+            sess.stop_at = None
+            sess.last_update_at = datetime.now()
+            db.commit()
+        svc.mark_authenticated(db, sess, "login", user_id=user.id, phone=user.phone or "",
+                              gw_id=data.gw_id, mac=data.mac, ip=ip, reason="password_login")
     return JSONResponse({
         "ok": True,
         "redirect": build_gateway_redirect(data.gw_address, data.gw_port, token, data.gw_id),
@@ -286,6 +348,25 @@ def password_login(data: PwdLoginIn, request: Request, db: Session = Depends(get
 
 
 # ------------------------------------------------------------------ 套餐与购买
+@router.get("/api/plans")
+def api_plans(db: Session = Depends(get_db)):
+    """门户套餐实时数据：后台改价/上下架后，套餐页无需整页刷新即可变化。"""
+    plans = db.query(Plan).filter(Plan.status == 1).order_by(Plan.sort.desc(), Plan.id.asc()).all()
+    return {
+        "ok": True,
+        "rows": [{
+            "id": p.id,
+            "name": p.name,
+            "duration_minutes": p.duration_minutes or 0,
+            "traffic_mb": p.traffic_mb or 0,
+            "device_limit": p.device_limit or 0,
+            "valid_days": p.valid_days or 0,
+            "description": p.description or "",
+            "price_text": f"{(p.price or 0) / 100:.2f}",
+        } for p in plans],
+    }
+
+
 @router.get("/plans", response_class=HTMLResponse)
 def plans_page(request: Request, phone: str = "", token: str = "", db: Session = Depends(get_db)):
     plans = db.query(Plan).filter(Plan.status == 1).order_by(Plan.sort.desc(), Plan.id.asc()).all()
@@ -295,6 +376,7 @@ def plans_page(request: Request, phone: str = "", token: str = "", db: Session =
         context={
             "request": request, "plans": plans, "phone": phone, "token": token,
             "notice": settings_store.get_site_notice(db),
+            "site_name": settings_store.get_site_name(db),
         },
     )
 
@@ -311,23 +393,49 @@ def buy(data: BuyIn, request: Request, db: Session = Depends(get_db)):
         return JSONResponse({"ok": False, "msg": "套餐不存在或已下架"})
 
     phone = (data.phone or "").strip()
-    if _bad_phone(phone):
-        return JSONResponse({"ok": False, "msg": "请输入正确的手机号"})
+    token = (data.token or "").strip()
+    user = None
+    if token:
+        sess = db.query(Sess).filter(Sess.token == token).first()
+        if not sess:
+            return JSONResponse({"ok": False, "msg": "登录状态已失效，请重新登录"})
+        user = db.query(User).filter(User.id == sess.user_id).first()
 
-    user = db.query(User).filter(User.phone == phone).first()
-    if not user:
-        user = svc.get_or_create_user(db, phone, ip)
-    if user.status != 1:
-        return JSONResponse({"ok": False, "msg": "账号已被禁用"})
+    if user is None:
+        if _bad_phone(phone):
+            return JSONResponse({"ok": False, "msg": "请输入正确的手机号"})
+        user = db.query(User).filter(User.phone == phone).first()
+        if not user:
+            user = svc.get_or_create_user(db, phone, ip)
+    elif phone:
+        if _bad_phone(phone):
+            return JSONResponse({"ok": False, "msg": "请输入正确的手机号"})
+        if user.phone and user.phone != phone:
+            return JSONResponse({"ok": False, "msg": "当前账号已绑定其他手机号，请使用原手机号"})
+        if not user.phone:
+            other = db.query(User).filter(User.phone == phone, User.id != user.id).first()
+            if other:
+                return JSONResponse({"ok": False, "msg": "该手机号已被其他账号绑定"})
+            user.phone = phone
+            db.commit()
+    if user is None or user.status != 1:
+        return JSONResponse({"ok": False, "msg": "账号已被禁用或不存在"})
 
     order = svc.create_order(db, user, plan)
 
     # 关键：支付渠道由服务端决定，客户端无法指定 mock（P0-2）
     pay_type = settings_store.pay_provider(db)
+    order.pay_type = pay_type
+    db.commit()
     if pay_type == "mock" and not settings_store.is_test_mode(db):
         return JSONResponse({"ok": False, "msg": "支付渠道未配置，请联系管理员"})
 
-    result = payment.create_charge(order.order_no, plan.price, plan.name, pay_type)
+    # 同步返回只带一次性签名的订单票据，避免把上网 token 暴露给支付宝
+    return_url = ALIPAY_RETURN_URL
+    if return_url:
+        return_ticket = make_signed_token("payreturn", order.order_no, 900)
+        return_url += ("&" if "?" in return_url else "?") + "rt=" + quote(return_ticket)
+    result = payment.create_charge(order.order_no, plan.price, plan.name, pay_type, return_url=return_url)
     if result.get("code") != 0:
         return JSONResponse({"ok": False, "msg": result.get("message", "支付发起失败")})
     return JSONResponse({
@@ -335,6 +443,7 @@ def buy(data: BuyIn, request: Request, db: Session = Depends(get_db)):
         "order_no": order.order_no,
         "pay_url": result.get("pay_url"),
         "qr": result.get("qr", False),
+        "token": token,
     })
 
 
@@ -349,8 +458,26 @@ def pay_mock(request: Request, order_no: str = "", db: Session = Depends(get_db)
     return templates.TemplateResponse(
         request=request,
         name="portal/pay_mock.html",
-        context={"request": request, "order": order},
+        context={"request": request, "order": order, "site_name": settings_store.get_site_name(db)},
     )
+
+
+@router.get("/api/order/status")
+def order_status(order_no: str = "", db: Session = Depends(get_db)):
+    """订单状态实时查询：支付页可据此自动更新，不依赖整页刷新。"""
+    order = db.query(Order).filter(Order.order_no == order_no).first()
+    if not order:
+        return JSONResponse({"ok": False, "msg": "订单不存在"})
+    texts = {0: "待支付", 1: "已支付", 2: "已关闭", 3: "已退款"}
+    return {
+        "ok": True,
+        "order_no": order.order_no,
+        "status": order.status,
+        "status_text": texts.get(order.status, "未知"),
+        "amount": order.amount,
+        "plan_name": order.plan_name,
+        "paid_at": order.paid_at.strftime("%Y-%m-%d %H:%M:%S") if order.paid_at else "",
+    }
 
 
 @router.post("/api/pay/confirm")
@@ -382,46 +509,90 @@ def _finish_paid_order(db, order, pay_type: str, trade_no: str) -> str:
 
 @router.post("/api/pay/notify/alipay")
 async def alipay_notify(request: Request, db: Session = Depends(get_db)):
-    """支付宝异步通知：RSA2 验签 + 金额核对 + 幂等开通。"""
+    """支付宝异步通知：RSA2 验签 + 应用/卖家核验 + 金额核对 + 事件幂等。"""
     form = await request.form()
-    data = {k: v for k, v in form.items()}
+    data = {k: str(v) for k, v in form.items()}
     order_no = data.get("out_trade_no", "")
     order = db.query(Order).filter(Order.order_no == order_no).first()
     if not order:
         return HTMLResponse("fail")
 
-    if not payment.verify_alipay_notify(data):
+    if not alipay.verify_params(data):
         svc.write_log(db, "pay", "fail", user_id=order.user_id, reason="alipay verify failed")
         return HTMLResponse("fail")
+    if ALIPAY_APPID and data.get("app_id") and data.get("app_id") != ALIPAY_APPID:
+        svc.write_log(db, "pay", "fail", user_id=order.user_id, reason="alipay app_id mismatch")
+        return HTMLResponse("fail")
+    if ALIPAY_SELLER_ID and data.get("seller_id") and data.get("seller_id") != ALIPAY_SELLER_ID:
+        svc.write_log(db, "pay", "fail", user_id=order.user_id, reason="alipay seller_id mismatch")
+        return HTMLResponse("fail")
 
-    # 金额核对
+    # 金额核对（Decimal，避免浮点误差）
     try:
-        paid = round(float(data.get("total_amount", "0")) * 100)
-    except (TypeError, ValueError):
+        paid = int((Decimal(data.get("total_amount", "0")) * 100).quantize(Decimal("1")))
+    except (InvalidOperation, TypeError, ValueError):
         return HTMLResponse("fail")
     if paid != order.amount:
         svc.write_log(db, "pay", "fail", user_id=order.user_id,
                       reason=f"alipay amount mismatch {paid} != {order.amount}")
         return HTMLResponse("fail")
 
-    if data.get("trade_status") not in ("TRADE_SUCCESS", "TRADE_FINISHED"):
-        return HTMLResponse("success")  # 非成功状态不处理，但要应答成功停止重发
+    # 事件幂等：同一 notify_id 只处理一次；重复通知直接应答 success
+    event_key = alipay.notify_event_key(data)
+    existed = db.query(PaymentEvent).filter(PaymentEvent.event_key == event_key).first()
+    if existed:
+        return HTMLResponse("success")
+    payload_text = json.dumps(data, ensure_ascii=False, sort_keys=True)
+    db.add(PaymentEvent(
+        channel="alipay", event_type="notify", event_key=event_key,
+        order_no=order_no, trade_no=data.get("trade_no", ""),
+        payload_hash=hashlib.sha256(payload_text.encode()).hexdigest(),
+        payload=payload_text[:4000], status="received",
+    ))
+    db.commit()
 
-    return HTMLResponse(_finish_paid_order(db, order, "alipay", data.get("trade_no", "")))
+    order.notify_id = data.get("notify_id", "")[:128]
+    order.alipay_trade_status = data.get("trade_status", "")[:32]
+    order.trade_no = data.get("trade_no", "")[:128]
+    pay_type = "alipay"
+
+    status = data.get("trade_status")
+    if status in ("TRADE_SUCCESS", "TRADE_FINISHED"):
+        if order.status in (1, 3):
+            db.commit()
+            return HTMLResponse("success")
+        try:
+            return HTMLResponse(_finish_paid_order(db, order, pay_type, order.trade_no))
+        except Exception:  # noqa: BLE001
+            db.rollback()
+            # 本地开通失败时移除事件，允许支付宝重试
+            db.query(PaymentEvent).filter(PaymentEvent.event_key == event_key).delete()
+            db.commit()
+            raise
+    if status == "TRADE_CLOSED" and order.status == 0:
+        order.status = 2
+    db.commit()
+    return HTMLResponse("success")  # 非成功状态也应答 success，停止支付宝重发
 
 
 @router.post("/api/pay/notify/wechat")
 async def wechat_notify(request: Request, db: Session = Depends(get_db)):
-    """微信支付 V3 回调：AES-GCM 解密（认证加密，解密成功即证明来源可信）+ 金额核对。"""
+    """微信支付 V3 回调：微信支付公钥验签 + AES-GCM 解密 + 金额核对。"""
+    raw_body = await request.body()
     try:
-        body = await request.json()
+        payment.verify_wechat_notify(request.headers, raw_body)
+    except ValueError as exc:
+        svc.write_log(db, "pay", "fail", reason=f"wechat notify verify failed: {exc}")
+        return JSONResponse({"code": "FAIL", "message": "verify failed"}, status_code=401)
+    try:
+        body = json.loads(raw_body)
     except Exception:  # noqa: BLE001
         return JSONResponse({"code": "FAIL", "message": "bad request"}, status_code=400)
 
     resource = body.get("resource") or {}
     plain = payment.decrypt_wechat_resource(resource)
     if not plain:
-        return JSONResponse({"code": "FAIL", "message": "verify failed"}, status_code=401)
+        return JSONResponse({"code": "FAIL", "message": "decrypt failed"}, status_code=401)
 
     order_no = plain.get("out_trade_no", "")
     order = db.query(Order).filter(Order.order_no == order_no).first()
@@ -457,33 +628,47 @@ def api_live(token: str = "", mac: str = "", db: Session = Depends(get_db)):
     sub = svc.get_active_subscription(db, user.id) if user else None
     now = datetime.now()
     seconds = max(0, int((now - sess.start_at).total_seconds())) if sess.start_at else 0
-    st = realtime.get(sess.mac)
+    cache_mac = sess.mac or (mac or "").lower()
+    st = realtime.get(cache_mac) if cache_mac else None
+    # 实时缓存只作短时补充；管理员踢线/退款后 revoked 必须立即压掉 LIVE
+    effective_online = (not getattr(sess, "revoked", False)) and (
+        svc.is_session_online(sess, now) or bool(st)
+    )
     # 账号维度：该用户名下当前在线的设备数（不是全网终端数）
     device_count = svc.online_device_count(db, user.id) if user else 0
-    if device_count == 0 and st:
+    if device_count == 0 and effective_online:
         device_count = 1
     online = device_count
+
+    rx_bytes = (st or {}).get("rx")
+    tx_bytes = (st or {}).get("tx")
+    if rx_bytes is None:
+        rx_bytes = sess.incoming_bytes or 0
+    if tx_bytes is None:
+        tx_bytes = sess.outgoing_bytes or 0
+    down_mbps = (st or {}).get("down_mbps", sess.down_mbps or 0)
+    up_mbps = (st or {}).get("up_mbps", sess.up_mbps or 0)
 
     return JSONResponse({
         "ok": True,
         "phone": (user.phone or "") if user else "",
-        "mac": sess.mac,
+        "mac": cache_mac,
         "ip": (st or {}).get("ip") or sess.ip,
         "seconds": seconds,
-        "down_mbps": (st or {}).get("down_mbps", 0),
-        "up_mbps": (st or {}).get("up_mbps", 0),
-        "down_kbps": round((st or {}).get("down_mbps", 0) * 1000, 1),
-        "up_kbps": round((st or {}).get("up_mbps", 0) * 1000, 1),
-        "rx_bytes": (st or {}).get("rx", 0),
-        "tx_bytes": (st or {}).get("tx", 0),
+        "down_mbps": down_mbps,
+        "up_mbps": up_mbps,
+        "down_kbps": round((down_mbps or 0) * 1000, 1),
+        "up_kbps": round((up_mbps or 0) * 1000, 1),
+        "rx_bytes": rx_bytes,
+        "tx_bytes": tx_bytes,
         "rssi": (st or {}).get("rssi", ""),
-        "live": bool(st),
+        "live": effective_online,
         "plan_name": sub.plan_name if sub else "",
         "expire_at": sub.expire_at.strftime("%Y-%m-%d") if (sub and sub.expire_at) else "",
         "days_left": max(0, (sub.expire_at - now).days) if (sub and sub.expire_at) else -1,
         "online": online,
         "device_count": device_count,
-        "status": sess.status,
+        "status": 1 if effective_online else 0,
     })
 
 
@@ -516,17 +701,43 @@ def me(request: Request, token: str = "", db: Session = Depends(get_db)):
 
 
 @router.get("/success", response_class=HTMLResponse)
-def success(request: Request, gw_id: str = "", token: str = "", db: Session = Depends(get_db)):
-    """认证成功页：按 token 渲染真实套餐/到期时间/在线设备数。"""
+def success(request: Request, gw_id: str = "", token: str = "", rt: str = "", db: Session = Depends(get_db)):
+    """认证成功页：按 token 渲染真实套餐/到期时间/在线设备数。
+
+    支付宝同步返回使用 15 分钟一次性签名票据 rt，不把上网 token 传给支付宝；
+    校验 rt 后为订单用户补签本地上网 token。
+    """
+    if not token and rt:
+        order_no = parse_signed_token(rt, "payreturn")
+        if order_no:
+            order = db.query(Order).filter(Order.order_no == order_no, Order.status == 1).first()
+            if order:
+                user = db.query(User).filter(User.id == order.user_id).first()
+                if user:
+                    token = issue_token(db, user.id, "", "")
     sess = db.query(Sess).filter(Sess.token == token).first() if token else None
     user = db.query(User).filter(User.id == sess.user_id).first() if sess else None
     sub = svc.get_active_subscription(db, user.id) if user else None
-    online = db.query(func.count(Sess.id)).filter(Sess.status == 1).scalar() or 0
+    online = svc.online_device_count(db, user.id) if user else 0
     return templates.TemplateResponse(
         request=request,
         name="portal/success.html",
         context={
             "request": request, "gw_id": gw_id, "token": token,
             "session": sess, "user": user, "sub": sub, "online": int(online),
+            "site_name": settings_store.get_site_name(db),
         },
     )
+
+
+@router.get("/pay/success", response_class=HTMLResponse, include_in_schema=False)
+def pay_success_tech(request: Request):
+    """公网专属支付成功页：无业务查询、无订单信息，仅展示“支付成功”。"""
+    response = templates.TemplateResponse(
+        request=request,
+        name="portal/pay_success_tech.html",
+        context={"request": request},
+    )
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return response

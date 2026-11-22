@@ -11,15 +11,15 @@ import asyncio
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from .. import realtime, services_auth as svc
-from ..config import GATEWAY_PROTO
+from .. import alipay, realtime, redis_bus as ws_bus, services_auth as svc
+from ..config import GATEWAY_PROTO, GWSTATS_KEY
 from ..database import get_db
 from ..models import Device, Plan, Session as Sess, User
 from ..security import new_token
@@ -116,6 +116,8 @@ def login_page(
             "change_token": "",
             "bound_mac": "",
             "cur_mac": mac,
+            "alipay_ready": alipay.oauth_ready(),
+            "alipay_pay_ready": alipay.pay_ready(),
         },
     )
 
@@ -300,6 +302,10 @@ def _auth_login(db, token: str, mac: str, ip: str, gw_id: str) -> str:
     if not sess:
         svc.write_log(db, "login", "fail", gw_id=gw_id, mac=mac, ip=ip, reason="invalid token")
         return "Auth: 0\n"
+    if getattr(sess, "revoked", False):
+        svc.write_log(db, "login", "fail", user_id=sess.user_id, gw_id=gw_id, mac=mac,
+                      ip=ip, reason="session revoked")
+        return "Auth: 0\n"
 
     # 2) token 有效期：过期会话不可再激活（P1-6）
     if sess.status != 1 and svc.token_expired(sess):
@@ -322,7 +328,8 @@ def _auth_login(db, token: str, mac: str, ip: str, gw_id: str) -> str:
         return "Auth: 0\n"
 
     svc.create_session(db, user, gw_id, mac, ip, token)
-    svc.write_log(db, "login", "success", user_id=user.id, gw_id=gw_id, mac=mac, ip=ip)
+    svc.mark_authenticated(db, sess, "login", user_id=user.id, phone=user.phone or "",
+                          gw_id=gw_id, mac=mac, ip=ip, reason="gateway_auth")
     return "Auth: 1\n"
 
 
@@ -364,12 +371,13 @@ def portal_page(request: Request, gw_id: str = "", token: str = "", db: Session 
     sess = svc.get_session(db, token) if token else None
     user = db.query(User).filter(User.id == sess.user_id).first() if sess else None
     sub = svc.get_active_subscription(db, user.id) if user else None
-    online = db.query(func.count(Sess.id)).filter(Sess.status == 1).scalar() or 0
+    online = svc.online_device_count(db, user.id) if user else 0
     return templates.TemplateResponse(
         request=request,
         name="portal/success.html",
         context={"request": request, "gw_id": gw_id, "token": token,
-                 "session": sess, "user": user, "sub": sub, "online": int(online)},
+                 "session": sess, "user": user, "sub": sub, "online": int(online),
+                 "site_name": get_site_name(db)},
     )
 
 
@@ -380,28 +388,155 @@ def message(gw_id: str = "", db: Session = Depends(get_db)):
 
 
 # ------------------------------------------------------------------ 供 portal 使用的工具
-_GWSTATS_KEY = "<your-gwstats-key>"
 
 
 @router.post("/gwstats")
-async def gwstats(request: Request):
-    """网关实时统计上报：网关原样 POST `wdctlx status client` 的 JSON。"""
+async def gwstats(request: Request, db: Session = Depends(get_db)):
+    """网关实时统计上报：网关原样 POST `wdctlx status client` 的 JSON。
+
+    除写入内存实时缓存外，同步回写 sessions / devices：
+    - 有 token 的终端把会话置为在线并更新流量；
+    - 用 gw_id 登记网关，避免后台“设备管理”始终为空。
+    """
     raw = await request.body()
     try:
         data = json.loads(raw or b"{}")
     except Exception:  # noqa: BLE001
         return {"ok": False, "msg": "bad json"}
     key = request.headers.get("x-gw-key") or (data.get("key") if isinstance(data, dict) else "") or ""
-    if key != _GWSTATS_KEY:
+    if not GWSTATS_KEY or key != GWSTATS_KEY:
         return {"ok": False, "msg": "bad key"}
-    clients = data.get("clients") if isinstance(data, dict) else None
-    gw_id = (data.get("gw_id") if isinstance(data, dict) else "") or ""
-    if isinstance(clients, list) and any(isinstance(c, dict) and "traffic" in c for c in clients):
-        n = realtime.ingest_gateway(clients, gw_id)
-    else:
-        n = realtime.ingest(gw_id, clients)
-    return {"ok": True, "n": n}
 
+    clients = data.get("clients") if isinstance(data, dict) else None
+    if not isinstance(clients, list):
+        clients = []
+    gw_id = (data.get("gw_id") if isinstance(data, dict) else "") or ""
+    if not gw_id:
+        for c in clients:
+            if isinstance(c, dict) and c.get("gw_id"):
+                gw_id = str(c.get("gw_id") or "")
+                break
+
+    def _to_int(v):
+        try:
+            return int(float(v or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    # 登记/刷新网关在线状态；gwstats 使用固定密钥，来源可信
+    if _valid_gw_id(gw_id):
+        try:
+            svc.touch_device(db, gw_id, _client_ip(request), 0, 0, 0.0, 0, auto_register=True)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("gwstats touch_device failed: %s (gid=%s)", e, gw_id)
+
+    # 同步终端会话：gwstats 的 status=0 表示空闲，不等于离线；
+    # 但必须重新校验黑名单/套餐/设备数，不能把已拉黑或已过期的会话写回在线。
+    synced = 0
+    denied = 0
+    reconciled = 0
+    seen_tokens = set()
+    seen_macs = set()
+    deny_targets = []
+    now = datetime.now()
+    for c in clients:
+        if not isinstance(c, dict):
+            continue
+        mac = (c.get("mac") or "").strip().lower()
+        if not mac:
+            continue
+        ip = str(c.get("ip") or "")
+        c_gw = str(c.get("gw_id") or gw_id or "")
+        token = str(c.get("token") or "")
+        if token:
+            seen_tokens.add(token)
+        seen_macs.add(mac)
+        t = c.get("traffic") or {}
+        incoming = _to_int(t.get("download_bytes")) + _to_int(t.get("download_bytes_v6"))
+        outgoing = _to_int(t.get("upload_bytes")) + _to_int(t.get("upload_bytes_v6"))
+        if not token:
+            continue
+
+        sess = db.query(Sess).filter(Sess.token == token).first()
+        if not sess:
+            continue
+
+        was_online = sess.status == 1
+        user = db.query(User).filter(User.id == sess.user_id).first() if sess.user_id else None
+        allowed = True
+        deny_reason = ""
+        sub = None
+
+        if svc.is_mac_blacklisted(db, mac):
+            allowed = False
+            deny_reason = "mac_blacklisted"
+        elif getattr(sess, "revoked", False):
+            allowed = False
+            deny_reason = "session_revoked"
+        elif not sess.user_id:
+            # 白名单固定会话：没有账号，直接放行
+            allowed = True
+        elif user is None:
+            allowed = False
+            deny_reason = "user_not_found"
+        elif svc.token_expired(sess):
+            allowed = False
+            deny_reason = "token_expired"
+        elif user:
+            ok, why, sub = svc.check_access(db, user, exclude_session_id=sess.id)
+            if not ok:
+                allowed = False
+                deny_reason = why
+
+        sess.gw_id = c_gw or sess.gw_id
+        sess.mac = mac
+        sess.ip = ip or sess.ip
+
+        if allowed:
+            sess.status = 1
+            sess.stop_at = None
+            svc.update_traffic(db, sess, incoming, outgoing, sub)
+            synced += 1
+            if not getattr(sess, "auth_logged", False):
+                svc.mark_authenticated(
+                    db, sess, "login" if user else "device_auto",
+                    user_id=sess.user_id, phone=(user.phone or "") if user else "",
+                    gw_id=sess.gw_id, mac=mac, ip=ip, reason="gwstats",
+                )
+        else:
+            if was_online:
+                denied += 1
+                deny_targets.append((mac, ip, c_gw))
+                svc.write_log(db, "denied", "fail", user_id=sess.user_id,
+                              phone=(user.phone or "") if user else "",
+                              gw_id=c_gw, mac=mac, ip=ip, reason=deny_reason)
+            sess.status = 0
+            sess.stop_at = now
+            db.commit()
+
+    # 路由器上报的 clients 是当前全量终端；超过 20 秒仍未出现的会话视为已断开。
+    # 这样网关断线/终端离开时，后台不会继续显示“在线”。
+    if _valid_gw_id(gw_id):
+        stale_cutoff = now - timedelta(seconds=20)
+        rows = db.query(Sess).filter(Sess.gw_id == gw_id, Sess.status == 1).all()
+        for old in rows:
+            if old.token in seen_tokens or old.mac in seen_macs:
+                continue
+            if (old.last_update_at or old.start_at or stale_cutoff) < stale_cutoff:
+                old.status = 0
+                old.stop_at = now
+                reconciled += 1
+        if reconciled:
+            db.commit()
+
+    for mac, ip, c_gw in deny_targets:
+        try:
+            await push_client_deny(mac, ip, c_gw)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("gwstats push deny failed: %s (mac=%s)", e, mac)
+
+    n = realtime.ingest_gateway(clients, gw_id)
+    return {"ok": True, "n": n, "synced": synced, "denied": denied, "reconciled": reconciled}
 
 def build_gateway_redirect(gw_address: str, gw_port: str, token: str, gw_id: str = "") -> str:
     port = gw_port or "2060"
@@ -415,32 +550,44 @@ def issue_token(db, user_id: int, gw_id: str = "", mac: str = "") -> str:
     """签发上网令牌并预建会话（网关确认后置为在线）。"""
     token = new_token(24)
     sess = Sess(token=token, user_id=user_id, gw_id=gw_id, mac=(mac or "").lower(),
-                status=0, start_at=datetime.now(), last_update_at=datetime.now())
+                status=0, start_at=datetime.now(), last_update_at=datetime.now(),
+                auth_logged=False, revoked=False, down_mbps=0, up_mbps=0)
     db.add(sess)
     db.commit()
     return token
 
 
 # ------------------------------------------------------------------ WebSocket 下行指令
+# 单进程本地连接；多 worker 时由 Redis 总线广播到持有网关连接的进程。
 _ws_links: list = []
+_ws_conn_ids: dict = {}
+_ws_pending: dict = {}
 
 
-def _ws_register(ws) -> None:
+async def _ws_register(ws, gw_id: str = "") -> None:
     _ws_links.append(ws)
+    cid = f"{ws_bus.WORKER_ID}:{new_token(10)}"
+    _ws_conn_ids[ws] = cid
+    await ws_bus.register_conn(cid, gw_id)
 
 
-def _ws_unregister(ws) -> None:
+async def _ws_unregister(ws) -> None:
     try:
         _ws_links.remove(ws)
     except ValueError:
         pass
+    cid = _ws_conn_ids.pop(ws, "")
+    if cid:
+        await ws_bus.unregister_conn(cid)
 
 
-_ws_pending: dict = {}
+def ws_client_count() -> int:
+    """全局网关长连接数；Redis 不可用时回退本进程计数。"""
+    return max(len(_ws_links), ws_bus.global_conn_count())
 
 
 async def ws_call(payload: dict, timeout: float = 3.0):
-    """向网关于请求并等待回执（按 req_id 关联）。"""
+    """向网关于请求并等待回执（按 req_id 关联，支持跨 worker）。"""
     rid = payload.get("req_id") or ("srv-" + new_token(8))
     payload["req_id"] = rid
     fut = asyncio.get_running_loop().create_future()
@@ -474,18 +621,49 @@ async def fetch_client_ip(mac: str) -> str:
     return (data.get("ip") or "") if isinstance(data, dict) else ""
 
 
-async def push_op(payload: dict) -> int:
-    """向所有在线网关推送一条下行指令，返回成功发送的连接数。"""
+async def _ws_deliver_local(payload: dict) -> int:
+    """只向本 worker 持有的网关连接发送。"""
     sent = 0
     for ws in list(_ws_links):
         try:
             await ws.send_text(json.dumps(payload, ensure_ascii=False))
             sent += 1
         except Exception:  # noqa: BLE001
-            _ws_unregister(ws)
-    logger.info("WS 下发 %s -> %d 个连接, payload=%s",
-                payload.get("op"), sent, json.dumps(payload, ensure_ascii=False)[:200])
+            await _ws_unregister(ws)
+    if sent:
+        logger.info("WS 本地下发 %s -> %d 个连接 worker=%s",
+                    payload.get("op"), sent, ws_bus.WORKER_ID)
     return sent
+
+
+async def ws_bus_deliver(payload: dict) -> None:
+    """Redis 总线回调：收到其他 worker 的命令后，只发本进程连接。"""
+    await _ws_deliver_local(payload)
+
+
+async def ws_bus_ack(data: dict) -> None:
+    """Redis 总线回调：解析其他 worker 送回的网关回执。"""
+    msg = data.get("msg") if isinstance(data, dict) else None
+    if not isinstance(msg, dict):
+        return
+    rid = msg.get("req_id")
+    fut = _ws_pending.get(rid) if rid else None
+    if fut is not None and not fut.done():
+        fut.set_result(msg)
+
+
+async def push_op(payload: dict) -> int:
+    """下发指令：本进程直接发，同时广播给其他 worker。
+    返回 >0 表示至少有一个网关连接可接收（本地或跨进程排队）。
+    """
+    local_sent = await _ws_deliver_local(payload)
+    published = await ws_bus.publish_command(payload)
+    if local_sent:
+        return local_sent
+    if published and ws_bus.global_conn_count() > 0:
+        return 1
+    logger.info("WS 下发 %s -> 0 个连接（无网关在线）", payload.get("op"))
+    return 0
 
 
 async def push_client_allow(mac: str, ip: str = "", gw_id: str = "", token: str = "") -> int:
@@ -522,11 +700,15 @@ async def push_client_deny(mac: str, ip: str = "", gw_id: str = "") -> int:
 async def gateway_ws(websocket: WebSocket):
     """apfree-wifidog 9.x 云模式长连接：握手成功网关才把认证服务器标记为在线。"""
     await websocket.accept()
-    _ws_register(websocket)
-    logger.info("网关 WebSocket 连接建立: %s", websocket.client)
+    gw_id = (websocket.query_params.get("gw_id") or "").strip()
+    await _ws_register(websocket, gw_id)
+    cid = _ws_conn_ids.get(websocket, "")
+    logger.info("网关 WebSocket 连接建立: %s worker=%s conn=%s",
+                websocket.client, ws_bus.WORKER_ID, cid)
     try:
         while True:
             raw = await websocket.receive_text()
+            await ws_bus.heartbeat_conn(cid)
             try:
                 msg = json.loads(raw)
             except Exception:  # noqa: BLE001
@@ -547,9 +729,12 @@ async def gateway_ws(websocket: WebSocket):
                 fut = _ws_pending.get(rid) if rid else None
                 if fut is not None and not fut.done():
                     fut.set_result(msg)
+                # 跨 worker：本进程可能不是发起请求的 worker
+                if rid is not None and "response" in msg:
+                    await ws_bus.publish_ack(msg)
                 continue
             logger.debug("网关上行: %s", raw[:160])
     except WebSocketDisconnect:
         logger.info("网关 WebSocket 断开: %s", websocket.client)
     finally:
-        _ws_unregister(websocket)
+        await _ws_unregister(websocket)

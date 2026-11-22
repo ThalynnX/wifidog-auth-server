@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#07111d"><title>确认模拟支付 · WiFidog</title><link rel="icon" href="/static/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/static/ui.css?v=2.0.1"></head>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#07111d"><title>确认模拟支付 · {{ site_name }}</title><link rel="icon" href="/static/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/static/ui.css?v=2.0.1"></head>
 <body class="portal-body">
 <main class="portal-wrap">
   <div class="portal-top"><div class="brand"><div class="brand-mark"><svg viewBox="0 0 24 24"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6"/></svg></div><div><div class="brand-name">安全收银台</div><div class="brand-sub">Sandbox Payment</div></div></div><div class="portal-status"><i class="live-dot"></i>TEST MODE</div></div>
@@ -24,8 +24,12 @@
 <script>
 (function(){
   const btn=document.getElementById('payBtn'),msg=document.getElementById('msg'),statusBtn=document.getElementById('statusBtn');
+  const orderNo={{ order.order_no|tojson }};
+  const statusEl=document.getElementById('orderStatus');
   const get=k=>{try{return localStorage.getItem(k)||''}catch(e){return''}},set=(k,v)=>{try{localStorage.setItem(k,v||'')}catch(e){}};
   const say=(text,type)=>{msg.textContent=text||'';msg.className='form-msg'+(type?' '+type:'');};
+  const statusText={0:'待支付',1:'已支付',2:'已关闭',3:'已退款'};
+  let finished=false,busy=false;
   const success=()=>{statusBtn.classList.remove('hide');statusBtn.onclick=()=>location.href='/portal/success?token='+encodeURIComponent(get('wg_token'))+'&gw_id='+encodeURIComponent(get('wg_gw_id'));};
   async function recoverSession(){
     const mac=get('wg_mac'),gwId=get('wg_gw_id');if(!mac||!gwId)return;
@@ -33,17 +37,35 @@
     const r=await UI.post('/portal/api/device/auto',{mac,ip:get('wg_ip'),gw_id:gwId},{silent:true});
     if(r.ok&&r.token)set('wg_token',r.token);
   }
-  if({{ 1 if order.status == 1 else 0 }})success();
+  async function applyStatus(status, fromServer){
+    const text=statusText[status]||'未知';
+    if(statusEl.textContent!==text)statusEl.textContent=text;
+    if(status===1){
+      if(!finished){finished=true;btn.disabled=true;btn.textContent='支付已完成';success();if(fromServer)await recoverSession();}
+      return;
+    }
+    if(status===0){btn.disabled=false;btn.textContent='确认支付 ¥{{ "%.2f"|format(order.amount / 100) }}';return;}
+    finished=true;btn.disabled=true;btn.textContent=status===2?'订单已关闭':'订单已退款';
+  }
+  async function syncOrder(){
+    if(busy||finished)return;
+    const r=await UI.api('/portal/api/order/status?order_no='+encodeURIComponent(orderNo),{silent:true});
+    if(r.ok)await applyStatus(Number(r.status),true);
+  }
+  if({{ 1 if order.status == 1 else 0 }}){finished=true;success();}
   document.getElementById('backBtn').onclick=()=>location.href='/portal/plans?phone='+encodeURIComponent(get('wg_phone'))+'&token='+encodeURIComponent(get('wg_token'));
   btn.onclick=async function(){
     if(btn.dataset.busy==='1'||btn.disabled)return;
     if(!await UI.confirm({title:'确认模拟支付',text:'确认支付订单 {{ order.order_no }}？测试环境不会真实扣款。',okText:'确认支付'}))return;
-    UI.busy(btn,true,'正在确认支付…');say('正在提交支付结果并开通套餐…','info');
-    const r=await UI.post('/portal/api/pay/confirm',{order_no:{{ order.order_no|tojson }}});
-    if(r.ok){document.getElementById('orderStatus').textContent='已支付';say(r.msg||'支付成功，套餐已开通','ok');success();btn.textContent='支付已完成';await recoverSession();say('支付成功，设备已就绪','ok');setTimeout(()=>statusBtn.click(),500);return;}
+    busy=true;UI.busy(btn,true,'正在确认支付…');say('正在提交支付结果并开通套餐…','info');
+    const r=await UI.post('/portal/api/pay/confirm',{order_no:orderNo});
+    if(r.ok){await applyStatus(1,false);await recoverSession();say('支付成功，设备已就绪','ok');setTimeout(()=>statusBtn.click(),500);return;}
     UI.busy(btn,false);say(r.msg||'支付确认失败');
-    if((r.msg||'').includes('已支付')){success();document.getElementById('orderStatus').textContent='已支付';}
+    if((r.msg||'').includes('已支付')){await applyStatus(1,true);}
+    busy=false;
   };
+  syncOrder();
+  setInterval(()=>{if(!document.hidden)syncOrder();},3000);
 })();
 </script>
 </body></html>

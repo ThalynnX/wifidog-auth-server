@@ -5,6 +5,7 @@
   run_mode = production 正式模式：短信/支付走配置的真实通道，mock 支付确认关闭
 优先级：后台"系统设置"中的 run_mode > 环境变量 WIFIDOG_RUN_MODE > 默认 test
 """
+import base64
 import os
 import secrets
 from pathlib import Path
@@ -49,6 +50,9 @@ RUN_MODE_DEFAULT = os.getenv("WIFIDOG_RUN_MODE", "test").strip().lower()
 if RUN_MODE_DEFAULT not in ("test", "production"):
     RUN_MODE_DEFAULT = "test"
 
+# 网关统计上报共享密钥：仅从环境变量读取，仓库中不保存真实值
+GWSTATS_KEY = os.getenv("WIFIDOG_GWSTATS_KEY", "").strip()
+
 # ---------------------------------------------------------------- 服务
 SITE_NAME = os.getenv("WIFIDOG_SITE_NAME", "WiFi 认证服务")
 PUBLIC_BASE = os.getenv("WIFIDOG_PUBLIC_BASE", "")
@@ -58,9 +62,13 @@ GATEWAY_PROTO = os.getenv("WIFIDOG_GATEWAY_PROTO", "http")
 FREE_TRIAL_MINUTES = int(os.getenv("WIFIDOG_FREE_TRIAL_MINUTES", "10"))
 FREE_TRIAL_TRAFFIC_MB = int(os.getenv("WIFIDOG_FREE_TRIAL_TRAFFIC_MB", "100"))
 DEFAULT_DEVICE_LIMIT = int(os.getenv("WIFIDOG_DEVICE_LIMIT", "3"))
-SESSION_IDLE_TIMEOUT = int(os.getenv("WIFIDOG_SESSION_IDLE_TIMEOUT", "600"))
+SESSION_IDLE_TIMEOUT = int(os.getenv("WIFIDOG_SESSION_IDLE_TIMEOUT", "180"))
 # 网关心跳超时（秒）：超过该时间未 ping 的设备标记为离线（网关默认 60s 一次心跳）
-DEVICE_OFFLINE_TIMEOUT = int(os.getenv("WIFIDOG_DEVICE_OFFLINE_TIMEOUT", "180"))
+DEVICE_OFFLINE_TIMEOUT = int(os.getenv("WIFIDOG_DEVICE_OFFLINE_TIMEOUT", "120"))
+# 后台/门户“在线”判定窗口：status=1 且最近一次网关上报在该窗口内，避免僵尸会话
+ONLINE_WINDOW_SECONDS = int(os.getenv("WIFIDOG_ONLINE_WINDOW_SECONDS", "120"))
+# 多 worker WebSocket 总线；Redis 仅监听 127.0.0.1
+REDIS_URL = os.getenv("WIFIDOG_REDIS_URL", "redis://127.0.0.1:6379/0")
 
 # ---------------------------------------------------------------- 短信（占位符，正式接入时替换）
 # provider: mock / aliyun / http
@@ -81,13 +89,54 @@ WECHAT_APPID = os.getenv("WIFIDOG_WECHAT_APPID", "<your-wechat-appid>")
 WECHAT_MCHID = os.getenv("WIFIDOG_WECHAT_MCHID", "<your-wechat-mchid>")
 WECHAT_API_V3 = os.getenv("WIFIDOG_WECHAT_API_V3", "<your-wechat-apiv3-key>")
 WECHAT_SERIAL_NO = os.getenv("WIFIDOG_WECHAT_SERIAL_NO", "<your-cert-serial>")
-WECHAT_PRIVATE_KEY = os.getenv("WIFIDOG_WECHAT_PRIVATE_KEY", "")  # PEM 原文
 WECHAT_NOTIFY_URL = os.getenv("WIFIDOG_WECHAT_NOTIFY_URL", "")
 
+def _pem_env(name: str, default: str = "") -> str:
+    """读取 PEM 配置，兼容 systemd 单行 .env。
+
+    支持三种写法：
+    1) 真实多行 PEM（.env 中不推荐）
+    2) 单行 \\n 转义 PEM
+    3) base64: 前缀的整段 PEM base64（最稳妥，推荐生产使用）
+    """
+    value = os.getenv(name, default).strip()
+    if value.startswith("base64:"):
+        try:
+            return base64.b64decode(value[7:]).decode("utf-8").strip()
+        except Exception:
+            return ""
+    return value.replace("\\n", "\n").strip()
+
+
+# 微信支付 V3：商户私钥只用于请求签名；验签使用微信支付公钥（不是 APIv3 密钥）
+WECHAT_PRIVATE_KEY = _pem_env("WIFIDOG_WECHAT_PRIVATE_KEY")
+WECHAT_PUBLIC_KEY = _pem_env("WIFIDOG_WECHAT_PUBLIC_KEY")
+WECHAT_PUBLIC_KEY_ID = os.getenv("WIFIDOG_WECHAT_PUBLIC_KEY_ID", "").strip()
+# 公钥/平台证书灰度期双验签；平台证书仅用于兼容旧签名，公钥模式仍优先
+WECHAT_PLATFORM_CERT = _pem_env("WIFIDOG_WECHAT_PLATFORM_CERT")
+WECHAT_PLATFORM_SERIAL = os.getenv("WIFIDOG_WECHAT_PLATFORM_SERIAL", "").strip()
+
+
 ALIPAY_APPID = os.getenv("WIFIDOG_ALIPAY_APPID", "<your-alipay-appid>")
-ALIPAY_PRIVATE_KEY = os.getenv("WIFIDOG_ALIPAY_PRIVATE_KEY", "")  # PEM 原文
-ALIPAY_PUBLIC_KEY = os.getenv("WIFIDOG_ALIPAY_PUBLIC_KEY", "")    # 支付宝平台公钥 PEM
+ALIPAY_SELLER_ID = os.getenv("WIFIDOG_ALIPAY_SELLER_ID", "")
+ALIPAY_PRIVATE_KEY = _pem_env("WIFIDOG_ALIPAY_PRIVATE_KEY")
+ALIPAY_PUBLIC_KEY = _pem_env("WIFIDOG_ALIPAY_PUBLIC_KEY")
 ALIPAY_NOTIFY_URL = os.getenv("WIFIDOG_ALIPAY_NOTIFY_URL", "")
+ALIPAY_RETURN_URL = os.getenv(
+    "WIFIDOG_ALIPAY_RETURN_URL",
+    f"{PUBLIC_BASE.rstrip('/')}/portal/success" if PUBLIC_BASE else "",
+)
+ALIPAY_OAUTH_REDIRECT_URL = os.getenv(
+    "WIFIDOG_ALIPAY_OAUTH_REDIRECT_URL",
+    f"{PUBLIC_BASE.rstrip('/')}/portal/alipay/oauth/callback" if PUBLIC_BASE else "",
+)
+ALIPAY_OAUTH_SCOPE = os.getenv("WIFIDOG_ALIPAY_OAUTH_SCOPE", "auth_userinfo")
+ALIPAY_GATEWAY_URL = os.getenv(
+    "WIFIDOG_ALIPAY_GATEWAY_URL", "https://openapi.alipay.com/gateway.do"
+)
+ALIPAY_AUTH_URL = os.getenv(
+    "WIFIDOG_ALIPAY_AUTH_URL", "https://openauth.alipay.com/oauth2/publicAppAuthorize.htm"
+)
 
 
 def _configured(v: str) -> bool:
@@ -108,10 +157,22 @@ def sms_ready() -> bool:
 def pay_ready() -> bool:
     """真实支付通道是否已配置就绪。"""
     if PAY_PROVIDER == "alipay":
-        return _configured(ALIPAY_APPID) and ALIPAY_PRIVATE_KEY and ALIPAY_PUBLIC_KEY
+        return bool(
+            _configured(ALIPAY_APPID)
+            and ALIPAY_PRIVATE_KEY
+            and ALIPAY_PUBLIC_KEY
+            and ALIPAY_NOTIFY_URL.startswith(("http://", "https://"))
+        )
     if PAY_PROVIDER == "wechat":
-        return _configured(WECHAT_MCHID) and _configured(WECHAT_APPID) \
-            and _configured(WECHAT_API_V3) and WECHAT_PRIVATE_KEY and _configured(WECHAT_SERIAL_NO)
+        return bool(
+            _configured(WECHAT_MCHID)
+            and _configured(WECHAT_APPID)
+            and len(WECHAT_API_V3) == 32
+            and WECHAT_PRIVATE_KEY
+            and _configured(WECHAT_SERIAL_NO)
+            and WECHAT_PUBLIC_KEY
+            and WECHAT_NOTIFY_URL.startswith(("http://", "https://"))
+        )
     return False
 
 

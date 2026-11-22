@@ -14,10 +14,10 @@
     <div class="sidebar-brand">
       <div class="brand">
         <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 17a11 11 0 0 1 16 0M7 13.5a7 7 0 0 1 10 0M10.2 10.2a3 3 0 0 1 3.6 0"/><circle cx="12" cy="19" r="1"/></svg></div>
-        <div><div class="brand-name">{{ site_name }}</div><div class="brand-sub">Operations Center</div></div>
+        <div><div class="brand-name" id="adminBrand">{{ site_name }}</div><div class="brand-sub">Operations Center</div></div>
       </div>
     </div>
-    <div class="sidebar-status"><i class="live-dot"></i><span>认证服务运行中</span><span class="mono" style="margin-left:auto">ONLINE</span></div>
+    <div class="sidebar-status"><i class="live-dot" id="serviceDot"></i><span id="serviceStatus">认证服务运行中</span><span class="mono" id="serviceState" style="margin-left:auto">CHECKING</span></div>
     <nav class="nav" aria-label="后台导航">
       <button class="nav-btn active" data-page="dash" type="button"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span>数据概览</span></button>
       <button class="nav-btn" data-page="users" type="button"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20c0-4 2-6 6-6s6 2 6 6M17 8h4M19 6v4"/></svg><span>用户管理</span></button>
@@ -68,7 +68,7 @@
       </section>
 
       <section class="page" id="page-orders">
-        <div class="panel"><div class="panel-head"><div><div class="panel-title">订单管理</div><div class="panel-desc">支付流水、退款登记与套餐撤销</div></div><div class="toolbar"><select class="select" id="ostatus" aria-label="订单状态"><option value="-1">全部状态</option><option value="0">待支付</option><option value="1">已支付</option><option value="2">已关闭</option><option value="3">已退款</option></select><button class="btn ghost" id="orderRefresh" type="button">刷新</button></div></div><div class="panel-body flush"><div id="ordersBox"></div><div id="ordersPager"></div></div></div>
+        <div class="panel"><div class="panel-head"><div><div class="panel-title">订单管理</div><div class="panel-desc">支付流水、支付宝查单 / 关单 / 原路退款 / 对账与套餐撤销</div></div><div class="toolbar"><select class="select" id="ostatus" aria-label="订单状态"><option value="-1">全部状态</option><option value="0">待支付</option><option value="1">已支付</option><option value="2">已关闭</option><option value="3">已退款</option></select><button class="btn secondary" id="alipayReconcile" type="button">支付宝对账</button><button class="btn ghost" id="orderRefresh" type="button">刷新</button></div></div><div class="panel-body flush"><div id="ordersBox"></div><div id="ordersPager"></div></div></div>
       </section>
 
       <section class="page" id="page-sessions">
@@ -95,6 +95,7 @@
           </div></div>
           <div>
             <div class="panel"><div class="panel-head"><div class="panel-title">通道状态</div><button class="btn small ghost" id="channelRefresh" type="button">刷新</button></div><div class="panel-body"><div class="channel-list" id="channels"></div><div class="notice" style="margin:14px 0 0">短信与支付密钥仅从服务器 <span class="mono">.env</span> 读取，不在网页中显示或保存。</div></div></div>
+            <div class="panel"><div class="panel-head"><div><div class="panel-title">支付宝接入</div><div class="panel-desc">公钥模式 · RSA2 · 手机网站支付 + 授权登录</div></div><button class="btn small ghost" id="alipayStatusRefresh" type="button">刷新</button></div><div class="panel-body"><div id="alipayStatus" class="muted" style="font-size:12px">正在读取…</div></div></div>
             <div class="panel"><div class="panel-head"><div><div class="panel-title">修改管理员密码</div><div class="panel-desc">至少 8 位，建议混合字母、数字与符号</div></div></div><div class="panel-body">
               <div class="field"><label for="pwd_old">原密码</label><input class="input" id="pwd_old" type="password" autocomplete="current-password"></div>
               <div class="field"><label for="pwd_new">新密码</label><input class="input" id="pwd_new" type="password" autocomplete="new-password" minlength="8"></div>
@@ -176,13 +177,47 @@ async function loadDash() {
   const max = Math.max(1, ...trend.map(t => Number(t.count) || 0));
   $('chart').innerHTML = trend.map(t => '<div class="chart-col"><span class="chart-num">' + (Number(t.count) || 0) + '</span><div class="chart-track"><div class="chart-bar" style="height:' + Math.max(2, (Number(t.count) || 0) / max * 100) + '%"></div></div><span class="chart-date">' + UI.esc(t.date) + '</span></div>').join('') || '<div class="empty" style="width:100%">暂无趋势数据</div>';
   const deviceRate = r.devices_total ? Math.round(r.devices_online / r.devices_total * 100) : 0;
+  const wsClients = Number(r.ws_clients) || 0;
+  const dbOk = !!r.db_ok;
+  const lastGw = r.last_gateway_report || '暂无上报';
+  const serviceOk = wsClients > 0 || Number(r.devices_online) > 0;
+  const connText = wsClients > 0 ? '网关长连接' : (Number(r.devices_online) > 0 ? '网关心跳在线' : '网关未连');
+  $('serviceStatus').textContent = serviceOk ? '认证服务运行中 · ' + connText : '认证服务运行中 · 网关未连';
+  $('serviceState').textContent = serviceOk ? (wsClients > 0 ? 'LIVE' : 'HTTP') : 'NO GW';
+  $('serviceDot').style.background = serviceOk ? 'var(--green)' : 'var(--amber)';
   $('healthList').innerHTML = [
-    ['认证服务', '正常', 100], ['网关在线率', r.devices_online + ' / ' + r.devices_total, deviceRate],
-    ['今日用户增长', '+' + r.users_today, Math.min(100, r.users_today * 10)], ['待处理订单', r.orders_pending + ' 笔', Math.min(100, r.orders_pending * 10)]
+    ['认证服务', serviceOk ? '在线 · ' + connText + (wsClients ? '（' + wsClients + '）' : '') : '运行中 / 网关未连', serviceOk ? 100 : 65],
+    ['数据库', dbOk ? '正常' : '异常', dbOk ? 100 : 0],
+    ['Redis 总线', r.redis_ok ? '跨 worker 正常' : '单进程回退', r.redis_ok ? 100 : 60],
+    ['网关在线率', r.devices_online + ' / ' + r.devices_total, deviceRate],
+    ['最后网关上报', lastGw, lastGw === '暂无上报' ? 0 : 100],
+    ['待处理订单', r.orders_pending + ' 笔', Math.min(100, r.orders_pending * 10)]
   ].map(h => '<div><div class="health-row"><span class="k">' + h[0] + '</span><strong>' + h[1] + '</strong></div><div class="health-line"><i style="width:' + h[2] + '%"></i></div></div>').join('');
-  $('lastRefresh').textContent = '最后更新：' + new Date().toLocaleString('zh-CN', {hour12:false});
+  $('lastRefresh').textContent = '最后更新：' + (r.server_time || new Date().toLocaleString('zh-CN', {hour12:false})) + ' · 在线判定窗口 ' + (r.online_window_seconds || 120) + ' 秒';
 }
 $('dashRefresh').onclick = loadDash;
+
+// 所有列表页统一自动刷新；有弹窗/输入焦点时暂停，避免打断编辑。
+function canAutoRefresh() {
+  // 弹窗打开时暂停，避免刷新重建弹窗背后的列表；输入内容由设置页的 dirty 保护单独处理。
+  return !document.hidden && !document.querySelector('.modal-layer');
+}
+const autoLoaders = {
+  dash: () => loadDash(),
+  users: () => loadUsers(state.usersPage),
+  devices: () => loadDevices(),
+  plans: () => loadPlans(),
+  orders: () => loadOrders(state.ordersPage),
+  sessions: () => loadSessions(),
+  whitelist: () => loadWl(),
+  logs: () => loadLogs(state.logsPage),
+  settings: () => refreshSettingsLive()
+};
+setInterval(() => {
+  if (!canAutoRefresh()) return;
+  const fn = autoLoaders[state.current];
+  if (fn) Promise.resolve(fn()).catch(() => {});
+}, 3000);
 
 async function loadUsers(page = 1) {
   const q = $('uq').value.trim(); state.usersPage = Math.max(1, page);
@@ -301,21 +336,54 @@ async function loadOrders(page = 1) {
     o.id, '<span class="mono">' + UI.esc(o.order_no) + '</span>', '<span class="mono">' + UI.esc(o.phone || '-') + '</span>',
     UI.esc(o.plan_name) + '<br><strong>' + UI.money(o.amount) + '</strong>', '<span class="tag ' + cls[o.status] + '">' + names[o.status] + '</span>',
     UI.esc(o.pay_type || '-'), UI.esc(o.created_at) + '<br><span class="muted">' + UI.esc(o.paid_at || '未支付') + '</span>',
-    o.status === 1 ? '<button class="btn small warn" onclick="refundOrder(' + o.id + ')">退款登记</button>' : (o.refund_reason ? UI.esc(o.refund_reason) : '-')
+    '<div class="actions">' +
+      (o.status === 0 ? '<button class="btn small secondary" onclick="queryOrder(' + o.id + ')">查单</button><button class="btn small danger" onclick="closeOrder(' + o.id + ')">关单</button>' : '') +
+      (o.status === 1 ? '<button class="btn small secondary" onclick="queryOrder(' + o.id + ')">查单</button><button class="btn small warn" onclick="refundOrder(' + o.id + ')">退款</button>' : '') +
+      (o.status === 2 || o.status === 3 ? '<button class="btn small ghost" onclick="queryOrder(' + o.id + ')">查单</button>' : '') +
+    '</div>' + (o.refund_reason ? '<div class="muted" style="font-size:11px">' + UI.esc(o.refund_reason) + '</div>' : '')
   ]), '当前筛选条件下没有订单');
   $('ordersPager').innerHTML = UI.pager('orders', state.ordersPage, 20, r.total, 'loadOrders');
 }
 $('ostatus').onchange = () => loadOrders(1); $('orderRefresh').onclick = () => loadOrders(state.ordersPage);
+async function queryOrder(id) {
+  const order = state.orders.find(o => o.id === id); if (!order) return;
+  if (!await UI.confirm({title: '支付宝查单', text: '向支付宝查询订单 ' + order.order_no + ' 的真实交易状态？如已支付但本地未开通，会自动补单。', okText: '开始查单'})) return;
+  const r = await UI.post('/admin/api/alipay/orders/' + id + '/query', {});
+  UI.toast(r.msg || (r.ok ? '查单完成' : '查单失败'), r.ok ? 'ok' : 'error', r.ok ? 2500 : 6000);
+  if (r.ok) loadOrders(state.ordersPage);
+}
+async function closeOrder(id) {
+  const order = state.orders.find(o => o.id === id); if (!order) return;
+  if (!await UI.confirm({title: '关闭订单', text: '将同时关闭支付宝侧交易并关闭本地订单 ' + order.order_no + '。用户之后无法继续支付该订单。', okText: '确认关单', danger: true})) return;
+  const r = await UI.post('/admin/api/alipay/orders/' + id + '/close', {});
+  UI.toast(r.msg || (r.ok ? '关单成功' : '关单失败'), r.ok ? 'ok' : 'error', r.ok ? 2500 : 6000);
+  if (r.ok) loadOrders(state.ordersPage);
+}
 function refundOrder(id) {
   const order = state.orders.find(o => o.id === id); if (!order) return;
-  openModal({title: '退款登记 · ' + order.order_no, danger: true, okText: '确认退款并停用套餐',
-    body: '<div class="notice warn">此操作会撤销订单并立即停用该订单开通的套餐。支付宝 / 微信的真实资金退回需要在对应渠道后台单独完成。</div><div class="field"><label>退款原因</label><input class="input" id="r_reason" maxlength="250" value="用户申请退款"></div><label class="check"><input id="r_channel" type="checkbox"><span>我已在支付宝 / 微信渠道后台完成真实退款，此处仅做登记（mock 订单无需勾选）</span></label>',
+  const isAlipay = order.pay_type === 'alipay';
+  openModal({title: '退款 · ' + order.order_no, danger: true, okText: '确认退款并停用套餐',
+    body: '<div class="notice warn">' + (isAlipay ? '此操作会调用支付宝退款接口原路退回全部金额，并立即停用该订单开通的套餐。退款成功后不可撤销。' : '此操作会撤销订单并立即停用该订单开通的套餐。微信真实资金退回仍需在微信商户后台单独完成。') + '</div><div class="field"><label>退款原因</label><input class="input" id="r_reason" maxlength="250" value="用户申请退款"></div>' + (isAlipay ? '<div class="muted" style="font-size:12px">支付方式：支付宝 · 金额：' + UI.money(order.amount) + '</div>' : '<label class="check"><input id="r_channel" type="checkbox"><span>我已在微信渠道后台完成真实退款，此处仅做登记（mock 订单无需勾选）</span></label>'),
     onOk: async layer => {
-      const r = await UI.post('/admin/api/orders/' + id + '/refund', {reason: layer.querySelector('#r_reason').value, channel_refunded: layer.querySelector('#r_channel').checked});
-      if (r.ok) { UI.toast(r.msg || '退款已登记'); loadOrders(state.ordersPage); return true; }
+      const r = await UI.post('/admin/api/orders/' + id + '/refund', {reason: layer.querySelector('#r_reason').value, channel_refunded: !!(layer.querySelector('#r_channel') && layer.querySelector('#r_channel').checked)});
+      if (r.ok) { UI.toast(r.msg || '退款成功'); loadOrders(state.ordersPage); return true; }
       return r.msg || '退款失败';
     }});
 }
+$('alipayReconcile').onclick = async function() {
+  const today=new Date().toISOString().slice(0,10);
+  openModal({title: '支付宝交易对账', okText: '开始对账',
+    body: '<div class="field"><label>账单日期</label><input class="input" id="rc_date" value="' + today + '" placeholder="YYYY-MM-DD"><span class="help">支付宝交易账单通常 T+1 生成；请选择已有账单的日期。</span></div><div id="rc_result" class="muted" style="font-size:12px;margin-top:10px"></div>',
+    onOk: async layer => {
+      const date=layer.querySelector('#rc_date').value.trim();
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) return '日期格式应为 YYYY-MM-DD';
+      const box=layer.querySelector('#rc_result'); box.textContent='正在下载并核对账单…';
+      const r=await UI.api('/admin/api/alipay/reconcile?bill_date='+encodeURIComponent(date));
+      if(!r.ok){box.textContent=r.msg||'对账失败'; return false;}
+      box.innerHTML='<div class="notice ok">对账完成：账单 '+r.total+' 条，匹配 '+r.matched+' 条，金额不一致 '+r.amount_mismatch+' 条，本地无订单 '+r.missing_local+' 条。</div>' + (r.details && r.details.length ? UI.table(['订单号','支付宝交易号','状态','金额','问题'], r.details.map(d=>[d.order_no,d.trade_no,d.status,d.amount,d.issue]), '无差异') : '');
+      return false;
+    }});
+};
 
 async function loadSessions() {
   const r = await UI.api('/admin/api/sessions');
@@ -385,21 +453,75 @@ async function loadLogs(page = 1) {
 }
 $('logRefresh').onclick = () => loadLogs(state.logsPage);
 
-async function loadSettings() {
-  const r = await UI.api('/admin/api/settings');
-  if (!r.ok) return UI.toast(r.msg || '设置加载失败', 'error');
-  const s = r.settings || {}, c = r.channels || {};
-  $('set_run_mode').value = s.run_mode || 'test'; $('set_site_name').value = s.site_name || '';
-  $('set_free').value = s.free_trial_minutes || '0'; $('set_limit').value = s.default_device_limit || '0';
-  $('set_notice').value = s.site_notice || ''; $('noticeCount').textContent = $('set_notice').value.length;
+function renderChannelStatus(s, c) {
   $('channels').innerHTML = [
     ['短信通道', c.sms_provider || '-', c.sms_ready, c.sms_ready ? '参数已配置' : '未配置 / 将回退 mock'],
     ['支付通道', c.pay_provider || '-', c.pay_ready, c.pay_ready ? '参数已配置' : '未配置 / 正式模式不可收款'],
     ['当前模式', s.run_mode === 'production' ? 'PRODUCTION' : 'TEST', true, s.run_mode === 'production' ? '真实通道' : '模拟通道']
   ].map(ch => '<div class="channel"><div><strong>' + ch[0] + '</strong><div class="muted" style="font-size:11px">' + UI.esc(ch[1]) + ' · ' + ch[3] + '</div></div><span class="tag ' + (ch[2] ? '' : 'off') + '">' + (ch[2] ? '就绪' : '待配置') + '</span></div>').join('');
 }
+async function refreshSettingsLive() {
+  const r = await UI.api('/admin/api/settings', {silent:true});
+  if (!r.ok) return;
+  const s = r.settings || {};
+  if (!settingsDirty) syncSettingsForm(s);
+  renderChannelStatus(s, r.channels || {});
+  loadAlipayStatus();
+}
+let settingsDirty = false;
+function syncSettingsForm(s) {
+  const set = (id, value) => {
+    const el = $(id);
+    if (!el || document.activeElement === el) return;
+    const v = value == null ? '' : String(value);
+    if (el.value !== v) el.value = v;
+  };
+  set('set_run_mode', s.run_mode || 'test');
+  set('set_site_name', s.site_name || '');
+  set('set_free', s.free_trial_minutes || '0');
+  set('set_limit', s.default_device_limit || '0');
+  set('set_notice', s.site_notice || '');
+  $('noticeCount').textContent = $('set_notice').value.length;
+  const brand = $('adminBrand');
+  if (brand && s.site_name) brand.textContent = s.site_name;
+  if (s.site_name) document.title = s.site_name + ' · 管理后台';
+}
+async function loadSettings() {
+  const r = await UI.api('/admin/api/settings');
+  if (!r.ok) return UI.toast(r.msg || '设置加载失败', 'error');
+  const s = r.settings || {}, c = r.channels || {};
+  settingsDirty = false;
+  syncSettingsForm(s);
+  loadAlipayStatus();
+  renderChannelStatus(s, c);
+}
 $('channelRefresh').onclick = loadSettings;
-$('set_notice').oninput = () => $('noticeCount').textContent = $('set_notice').value.length;
+$('alipayStatusRefresh').onclick = loadAlipayStatus;
+async function loadAlipayStatus(){
+  const box=$('alipayStatus'); if(!box) return;
+  const r=await UI.api('/admin/api/alipay/status');
+  if(!r.ok){box.textContent=r.msg||'支付宝状态读取失败';return;}
+  const tag=(ok,on,off)=>'<span class="tag '+(ok?'':'bad')+'">'+(ok?on:off)+'</span>';
+  const line=(k,v)=>'<div style="display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.06)"><span class="muted">'+k+'</span><span class="mono" style="word-break:break-all;text-align:right">'+UI.esc(v||'-')+'</span></div>';
+  box.innerHTML =
+    line('APPID', r.app_id||'未配置') +
+    line('应用私钥', r.private_key_configured?'已配置':'未配置') +
+    line('支付宝平台公钥', r.public_key_configured?'已配置':'未配置') +
+    line('公钥指纹', r.public_key_fingerprint||'-') +
+    line('支付就绪', r.pay_ready?'是':'否') +
+    line('授权登录就绪', r.oauth_ready?'是':'否') +
+    line('支付回调', r.notify_url||'未配置') +
+    line('授权回调', r.oauth_redirect_url||'未配置') +
+    line('应用网关', r.app_gateway_url||'未配置') +
+    line('同步返回', r.return_url||'未配置') +
+    '<div style="margin-top:10px">'+tag(r.pay_ready,'支付可用','支付未就绪')+' '+tag(r.oauth_ready,'授权可用','授权未就绪')+'</div>';
+}
+$('set_notice').oninput = () => { settingsDirty = true; $('noticeCount').textContent = $('set_notice').value.length; };
+['set_run_mode','set_site_name','set_free','set_limit','set_notice'].forEach(id => {
+  const el = $(id); if (!el) return;
+  el.addEventListener('input', () => { settingsDirty = true; });
+  el.addEventListener('change', () => { settingsDirty = true; });
+});
 $('settingsSave').onclick = async function() {
   if (this.dataset.busy === '1') return;
   const free = Number($('set_free').value), limit = Number($('set_limit').value);
@@ -435,6 +557,7 @@ window.addEventListener('hashchange', () => switchPage(location.hash.slice(1), f
   const r = await UI.api('/admin/api/me');
   if (!r.ok) return;
   $('who').textContent = r.username; $('avatar').textContent = (r.username || 'A').charAt(0).toUpperCase();
+  loadDash().catch(() => {});
   switchPage(location.hash.slice(1) || 'dash', false);
 })();
 </script>

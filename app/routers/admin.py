@@ -8,8 +8,8 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from .. import ratelimit, services_auth as svc, settings_store
-from ..config import ADMIN_TOKEN_EXPIRE
+from .. import alipay, ratelimit, redis_bus as ws_bus, services_auth as svc, settings_store
+from ..config import ADMIN_TOKEN_EXPIRE, DEVICE_OFFLINE_TIMEOUT, ONLINE_WINDOW_SECONDS
 from ..database import get_db
 from ..models import (
     Admin, AuthLog, Device, IpWhitelist, MacBlacklist, MacWhitelist, Order, Plan,
@@ -17,6 +17,7 @@ from ..models import (
 )
 from ..security import hash_password, make_signed_token, parse_signed_token, verify_password
 from ..templates_env import templates
+from . import wifidog as wd
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -103,16 +104,26 @@ def index(request: Request, db: Session = Depends(get_db)):
 def stats(request: Request, db: Session = Depends(get_db)):
     current_admin(request, db)
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    now = datetime.now()
+    live_cutoff = now - timedelta(seconds=ONLINE_WINDOW_SECONDS)
+    device_cutoff = now - timedelta(seconds=DEVICE_OFFLINE_TIMEOUT)
+    auth_actions = ("login", "device_auto", "device_rebind")
 
-    online_users = db.query(func.count(func.distinct(Sess.user_id))).filter(Sess.status == 1).scalar() or 0
-    online_sessions = db.query(func.count(Sess.id)).filter(Sess.status == 1).scalar() or 0
+    online_users = db.query(func.count(func.distinct(Sess.user_id))).filter(
+        Sess.status == 1, Sess.last_update_at >= live_cutoff, Sess.user_id > 0
+    ).scalar() or 0
+    online_sessions = db.query(func.count(Sess.id)).filter(
+        Sess.status == 1, Sess.last_update_at >= live_cutoff
+    ).scalar() or 0
     devices_total = db.query(func.count(Device.id)).scalar() or 0
-    devices_online = db.query(func.count(Device.id)).filter(Device.online == 1).scalar() or 0
+    devices_online = db.query(func.count(Device.id)).filter(
+        Device.online == 1, Device.status == 1, Device.last_seen_at >= device_cutoff
+    ).scalar() or 0
     users_total = db.query(func.count(User.id)).scalar() or 0
     users_today = db.query(func.count(User.id)).filter(User.created_at >= today).scalar() or 0
 
     auth_today = db.query(func.count(AuthLog.id)).filter(
-        AuthLog.created_at >= today, AuthLog.action == "login", AuthLog.result == "success"
+        AuthLog.created_at >= today, AuthLog.action.in_(auth_actions), AuthLog.result == "success"
     ).scalar() or 0
 
     income_today = db.query(func.coalesce(func.sum(Order.amount), 0)).filter(
@@ -122,6 +133,7 @@ def stats(request: Request, db: Session = Depends(get_db)):
         Order.status == 1
     ).scalar() or 0
     orders_pending = db.query(func.count(Order.id)).filter(Order.status == 0).scalar() or 0
+    last_gateway = db.query(func.max(Device.last_seen_at)).scalar()
 
     # 近 7 日认证趋势：一次查询按日分组（兼容 SQLite date() 与 MySQL DATE()）
     week_ago = today - timedelta(days=6)
@@ -129,7 +141,7 @@ def stats(request: Request, db: Session = Depends(get_db)):
         db.query(func.date(AuthLog.created_at), func.count(AuthLog.id))
         .filter(
             AuthLog.created_at >= week_ago, AuthLog.created_at < today + timedelta(days=1),
-            AuthLog.action == "login", AuthLog.result == "success",
+            AuthLog.action.in_(auth_actions), AuthLog.result == "success",
         )
         .group_by(func.date(AuthLog.created_at))
         .all()
@@ -153,6 +165,15 @@ def stats(request: Request, db: Session = Depends(get_db)):
         "income_total": income_total,
         "orders_pending": orders_pending,
         "trend": trend,
+        "ws_clients": wd.ws_client_count(),
+        "redis_ok": ws_bus.redis_ok(),
+        "last_gateway_report": (
+            last_gateway.strftime("%Y-%m-%d %H:%M:%S") if last_gateway else ""
+        ),
+        "server_time": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "db_ok": True,
+        "online_window_seconds": ONLINE_WINDOW_SECONDS,
+        "device_window_seconds": DEVICE_OFFLINE_TIMEOUT,
     }
 
 
@@ -213,6 +234,7 @@ def user_toggle(uid: int, request: Request, db: Session = Depends(get_db)):
         for s in db.query(Sess).filter(Sess.user_id == uid, Sess.status == 1).all():
             s.status = 0
             s.stop_at = datetime.now()
+            s.revoked = True
         db.commit()
     return {"ok": True, "status": u.status}
 
@@ -221,10 +243,13 @@ def user_toggle(uid: int, request: Request, db: Session = Depends(get_db)):
 @router.get("/api/devices")
 def devices(request: Request, db: Session = Depends(get_db)):
     current_admin(request, db)
+    now = datetime.now()
+    cutoff = now - timedelta(seconds=DEVICE_OFFLINE_TIMEOUT)
     rows = db.query(Device).order_by(Device.id.desc()).limit(500).all()
     return {"ok": True, "rows": [{
         "id": d.id, "gw_id": d.gw_id, "name": d.name, "location": d.location,
-        "status": d.status, "online": d.online,
+        "status": d.status,
+        "online": 1 if (d.online == 1 and d.status == 1 and d.last_seen_at and d.last_seen_at >= cutoff) else 0,
         "last_seen_at": d.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if d.last_seen_at else "",
         "last_ip": d.last_ip, "sys_load": d.sys_load, "remark": d.remark,
     } for d in rows]}
@@ -359,23 +384,40 @@ def orders(request: Request, page: int = 1, size: int = 20, status: int = -1, db
         "paid_at": o.paid_at.strftime("%Y-%m-%d %H:%M") if o.paid_at else "",
         "refund_at": o.refund_at.strftime("%Y-%m-%d %H:%M") if o.refund_at else "",
         "refund_reason": o.refund_reason or "",
+        "refund_no": o.refund_no or "",
+        "trade_no": o.trade_no or "",
+        "notify_id": o.notify_id or "",
+        "alipay_trade_status": o.alipay_trade_status or "",
+        "last_query_at": o.last_query_at.strftime("%Y-%m-%d %H:%M") if o.last_query_at else "",
     } for o in rows]}
 
 
 # ------------------------------------------------------------------ 订单退款
 class RefundIn(BaseModel):
     reason: str = ""
-    channel_refunded: bool = False   # 真实渠道已在支付宝/微信后台退过款，这里只做登记
+    channel_refunded: bool = False   # 微信等未接入自动退款的渠道：已在渠道后台退过款，这里只登记
 
 
 @router.post("/api/orders/{oid}/refund")
 def order_refund(oid: int, data: RefundIn, request: Request, db: Session = Depends(get_db)):
-    """退款/退单：撤销订单、停用套餐；真实渠道需先在渠道后台退款再登记。"""
+    """退款/退单：支付宝订单自动原路退款；微信订单仍需渠道后台退款后登记。"""
     adm = current_admin(request, db)
     order = db.query(Order).filter(Order.id == oid).first()
     if not order:
         return {"ok": False, "msg": "订单不存在"}
-    ok, msg = svc.refund_order(db, order, data.reason, data.channel_refunded)
+    auto_refunded = False
+    if order.status == 1 and order.pay_type == "alipay" and not data.channel_refunded:
+        if not alipay.pay_ready():
+            return {"ok": False, "msg": "支付宝参数未配置，无法自动退款"}
+        refund_no = order.refund_no or ("RF" + order.order_no)
+        try:
+            alipay.refund_trade(order.order_no, order.amount, data.reason or "管理员退款", refund_no)
+        except alipay.AlipayError as exc:
+            return {"ok": False, "msg": f"支付宝退款失败：{exc}"}
+        order.refund_no = refund_no
+        db.commit()
+        auto_refunded = True
+    ok, msg = svc.refund_order(db, order, data.reason, data.channel_refunded or auto_refunded)
     if ok:
         svc.write_log(db, "refund", "ok", user_id=order.user_id,
                       reason=f"{order.order_no} {data.reason} by {adm.username}"[:250])
@@ -386,7 +428,10 @@ def order_refund(oid: int, data: RefundIn, request: Request, db: Session = Depen
 @router.get("/api/sessions")
 def sessions(request: Request, db: Session = Depends(get_db)):
     current_admin(request, db)
-    rows = db.query(Sess).filter(Sess.status == 1).order_by(Sess.last_update_at.desc()).limit(500).all()
+    cutoff = datetime.now() - timedelta(seconds=ONLINE_WINDOW_SECONDS)
+    rows = db.query(Sess).filter(
+        Sess.status == 1, Sess.last_update_at >= cutoff
+    ).order_by(Sess.last_update_at.desc()).limit(500).all()
     uids = {s.user_id for s in rows if s.user_id}
     umap = {}
     if uids:
@@ -415,8 +460,15 @@ async def kick(sid: int, request: Request, db: Session = Depends(get_db)):
         return {"ok": False, "msg": "会话不存在"}
     s.status = 0
     s.stop_at = datetime.now()
+    s.revoked = True
     db.commit()
 
+    # 立即通知网关删除该客户端授权；只改数据库会等下一次 counters 才断开。
+    if s.mac:
+        try:
+            await wd.push_client_deny(s.mac, s.ip, s.gw_id)
+        except Exception:  # noqa: BLE001
+            pass
     msg = "已踢下线"
     if block:
         if s.mac:
@@ -444,13 +496,22 @@ def blacklist(request: Request, db: Session = Depends(get_db)):
 
 
 @router.post("/api/blacklist")
-def blacklist_add(data: MacIn, request: Request, db: Session = Depends(get_db)):
+async def blacklist_add(data: MacIn, request: Request, db: Session = Depends(get_db)):
     current_admin(request, db)
     mac = data.mac.strip().lower().replace("-", ":")
     if not _MAC_RE.match(mac):
         return {"ok": False, "msg": "MAC 格式错误，应为 00:11:22:33:44:55"}
     if not svc.blacklist_mac(db, mac, note=data.note):
         return {"ok": False, "msg": "该 MAC 已在黑名单中"}
+    # 拉黑立即生效：数据库会话下线 + 网关即时 del_auth_client
+    old = db.query(Sess).filter(Sess.mac == mac, Sess.status == 1).order_by(Sess.id.desc()).first()
+    ip = old.ip if old else ""
+    gw = old.gw_id if old else ""
+    svc.close_sessions_for_mac(db, mac)
+    try:
+        await wd.push_client_deny(mac, ip, gw)
+    except Exception:  # noqa: BLE001
+        pass
     return {"ok": True}
 
 

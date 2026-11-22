@@ -43,6 +43,25 @@ def _migrate():
 
     wanted = {
         "sms_codes": {"attempts": "INTEGER NOT NULL DEFAULT 0"},
+        "users": {
+            "alipay_user_id": "VARCHAR(64)",
+            "alipay_nickname": "VARCHAR(128) DEFAULT ''",
+            "alipay_avatar": "VARCHAR(255) DEFAULT ''",
+            "alipay_bound_at": "DATETIME",
+        },
+        "orders": {
+            "refund_no": "VARCHAR(64) DEFAULT ''",
+            "notify_id": "VARCHAR(128) DEFAULT ''",
+            "alipay_trade_status": "VARCHAR(32) DEFAULT ''",
+            "last_query_at": "DATETIME",
+        },
+        "sessions": {
+            "down_mbps": "FLOAT DEFAULT 0",
+            "up_mbps": "FLOAT DEFAULT 0",
+            "last_rate_at": "DATETIME",
+            "auth_logged": "INTEGER NOT NULL DEFAULT 0",
+            "revoked": "INTEGER NOT NULL DEFAULT 0",
+        },
     }
     with engine.connect() as conn:
         for table, cols in wanted.items():
@@ -62,6 +81,26 @@ def _migrate():
                 conn.commit()
             except Exception as e:  # noqa: BLE001
                 print(f"[migrate] {table} 迁移跳过: {e}")
+        # 支付宝用户 ID 唯一索引：SQLite 用部分索引，MySQL 用普通唯一索引（NULL 可重复）
+        try:
+            if _is_sqlite:
+                conn.exec_driver_sql(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ux_users_alipay_user_id "
+                    "ON users(alipay_user_id) WHERE alipay_user_id IS NOT NULL"
+                )
+            else:
+                exists = conn.exec_driver_sql(
+                    "SELECT COUNT(1) FROM information_schema.statistics "
+                    "WHERE table_schema=DATABASE() AND table_name='users' "
+                    "AND index_name='ux_users_alipay_user_id'"
+                ).scalar()
+                if not exists:
+                    conn.exec_driver_sql(
+                        "ALTER TABLE users ADD UNIQUE INDEX ux_users_alipay_user_id (alipay_user_id)"
+                    )
+            conn.commit()
+        except Exception as e:  # noqa: BLE001
+            print(f"[migrate] users.alipay_user_id 索引跳过: {e}")
 
 
 def init_db():

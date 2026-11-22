@@ -27,6 +27,12 @@ class User(Base, TimestampMixin):
     nickname = Column(String(64), default="")
     avatar = Column(String(255), default="")
 
+    # 支付宝授权登录绑定；手机号可为空，购买套餐时再补绑
+    alipay_user_id = Column(String(64), unique=True, index=True, nullable=True)
+    alipay_nickname = Column(String(128), default="")
+    alipay_avatar = Column(String(255), default="")
+    alipay_bound_at = Column(DateTime, nullable=True)
+
     status = Column(Integer, default=1, nullable=False)  # 1正常 0禁用
     balance = Column(Integer, default=0, nullable=False)  # 余额(分)
 
@@ -108,6 +114,10 @@ class Order(Base, TimestampMixin):
     expire_at = Column(DateTime, nullable=True)
     refund_at = Column(DateTime, nullable=True)          # 退款时间
     refund_reason = Column(String(255), default="")      # 退款原因
+    refund_no = Column(String(64), default="", nullable=True)  # 支付宝退款请求号
+    notify_id = Column(String(128), default="", nullable=True) # 最近一次异步通知 ID
+    alipay_trade_status = Column(String(32), default="")       # 支付宝侧交易状态
+    last_query_at = Column(DateTime, nullable=True)             # 最近主动查单时间
 
 
 # ------------------------------------------------------------------ 用户订阅(生效中的套餐)
@@ -157,6 +167,11 @@ class Session(Base, TimestampMixin):
 
     incoming_bytes = Column(BigInteger, default=0)   # 下载
     outgoing_bytes = Column(BigInteger, default=0)   # 上传
+    down_mbps = Column(Float, default=0)             # 最近一次上报的实时下行速率
+    up_mbps = Column(Float, default=0)               # 最近一次上报的实时上行速率
+    last_rate_at = Column(DateTime, nullable=True)
+    auth_logged = Column(Boolean, default=False, nullable=False)  # 是否已写过成功认证日志
+    revoked = Column(Boolean, default=False, nullable=False)      # 管理员踢线/禁用后禁止旧 token 复活
     user_agent = Column(String(255), default="")
 
 
@@ -239,3 +254,30 @@ class IpWhitelist(Base, TimestampMixin):
     cidr = Column(String(64), unique=True, index=True, nullable=False)  # 单 IP 或网段，如 192.168.6.100 / 192.168.6.0/24
     note = Column(String(255), default="")
     status = Column(Integer, default=1, nullable=False)
+
+
+# ------------------------------------------------------------------ 支付宝 OAuth state（一次性，防 CSRF）
+class AlipayOAuthState(Base):
+    __tablename__ = "alipay_oauth_states"
+
+    id = Column(Integer, primary_key=True)
+    state = Column(String(96), unique=True, index=True, nullable=False)
+    payload = Column(Text, default="")          # JSON：gw_id/mac/ip/phone/next
+    used = Column(Boolean, default=False, nullable=False)
+    expire_at = Column(DateTime, nullable=False)
+
+
+# ------------------------------------------------------------------ 支付回调/应用网关事件（幂等与审计）
+class PaymentEvent(Base, TimestampMixin):
+    __tablename__ = "payment_events"
+
+    id = Column(Integer, primary_key=True)
+    channel = Column(String(20), default="alipay", nullable=False)
+    event_type = Column(String(32), default="", nullable=False)  # notify/gateway/query/refund
+    event_key = Column(String(160), unique=True, index=True, nullable=False)
+    order_no = Column(String(64), default="", index=True)
+    trade_no = Column(String(128), default="")
+    payload_hash = Column(String(64), default="")
+    payload = Column(Text, default="")
+    status = Column(String(32), default="received")
+    note = Column(String(255), default="")

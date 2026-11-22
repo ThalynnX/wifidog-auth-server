@@ -9,6 +9,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from . import models  # noqa: F401
@@ -17,9 +18,10 @@ from .config import (
 )
 from .database import SessionLocal, init_db
 from .models import Admin, Plan
-from .routers import admin, portal, wifidog, ws
+from .routers import admin, alipay_admin, alipay_portal, portal, wifidog, ws
 from .security import hash_password
 from . import services_auth as svc
+from . import redis_bus as ws_bus
 
 logging.basicConfig(
     level=logging.DEBUG if DEBUG else logging.INFO,
@@ -66,9 +68,9 @@ def _seed_defaults():
 def _cleanup_worker():
     """后台线程：定期回收超时会话、清理过期记录。
     （多 worker 下会重复执行，但操作均幂等，无害；加随机延迟错开峰值）"""
-    time.sleep(random.uniform(0, 30))
+    time.sleep(random.uniform(0, 10))
     while True:
-        time.sleep(120)
+        time.sleep(30)
         try:
             db = SessionLocal()
             n = svc.cleanup_idle_sessions(db, SESSION_IDLE_TIMEOUT)
@@ -86,10 +88,13 @@ def _cleanup_worker():
 async def lifespan(app: FastAPI):
     init_db()
     _seed_defaults()
+    # 多 worker 下 WebSocket 跨进程总线；Redis 不可用时自动退回单进程
+    await ws_bus.start(wifidog.ws_bus_deliver, wifidog.ws_bus_ack)
     t = threading.Thread(target=_cleanup_worker, daemon=True)
     t.start()
     logger.info("%s started (run_mode 初始值见后台设置)", SITE_NAME)
     yield
+    await ws_bus.stop()
     logger.info("%s stopped", SITE_NAME)
 
 
@@ -117,10 +122,23 @@ async def _strip_wifidog_trailing_slash(request: Request, call_next):
         request.scope["raw_path"] = new_path.encode("utf-8")
     return await call_next(request)
 
+
+@app.middleware("http")
+async def _no_store_dynamic(request: Request, call_next):
+    """管理后台/门户/网关接口一律禁用浏览器缓存，避免前端显示旧业务数据。"""
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith(("/admin", "/portal", "/wifidog/")):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 app.include_router(wifidog.router)
 app.include_router(portal.router)
+app.include_router(alipay_portal.router)
+app.include_router(alipay_admin.router)
 app.include_router(admin.router)
 app.include_router(ws.router)
 
@@ -139,4 +157,13 @@ def root():
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "service": "wifidog-auth"}
+    """健康检查：同时验证数据库可读，避免“进程活着但数据库不可用”的假健康。"""
+    db: Session = SessionLocal()
+    try:
+        db.execute(text("SELECT 1"))
+        db_ok = True
+    except Exception:  # noqa: BLE001
+        db_ok = False
+    finally:
+        db.close()
+    return {"ok": db_ok, "service": "wifidog-auth", "db": db_ok, "redis": ws_bus.redis_ok()}

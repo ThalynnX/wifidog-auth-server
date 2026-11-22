@@ -2,6 +2,8 @@
 
 数据源：网关 `wdctlx status client` 的 JSON（traffic.download_bytes / upload_bytes，
 以及 incoming_rate / outgoing_rate）。服务端用两次采样的字节差算真实速率。
+
+注意：网关的 status=0 表示“空闲”，不等于离线；在线终端仍应保留在缓存中。
 """
 
 import time
@@ -17,7 +19,7 @@ def _num(v):
         return 0
 
 
-def _store(mac, ip, rx, tx, rssi, gw_rate_down, gw_rate_up, gw_id):
+def _store(mac, ip, rx, tx, rssi, gw_rate_down, gw_rate_up, gw_id, active=True):
     now = time.time()
     old = _LATEST.get(mac)
     down = up = 0.0
@@ -43,6 +45,7 @@ def _store(mac, ip, rx, tx, rssi, gw_rate_down, gw_rate_up, gw_id):
         "ts": now,
         "gw_id": gw_id or "",
         "online": True,
+        "active": bool(active),
     }
 
 
@@ -52,12 +55,11 @@ def ingest_gateway(clients, gw_id=""):
     for c in clients or []:
         if not isinstance(c, dict):
             continue
-        if c.get("status") not in (1, "1", None):
-            continue
         mac = (c.get("mac") or "").strip().lower()
         if not mac:
             continue
         t = c.get("traffic") or {}
+        active = str(c.get("status", "")).lower() in ("1", "true", "active")
         _store(
             mac,
             c.get("ip") or "",
@@ -67,6 +69,7 @@ def ingest_gateway(clients, gw_id=""):
             _num(t.get("incoming_rate")),
             _num(t.get("outgoing_rate")),
             gw_id or c.get("gw_id") or "",
+            active=active,
         )
         n += 1
     return n

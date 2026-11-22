@@ -7,7 +7,8 @@ from typing import Optional, Tuple
 from sqlalchemy import func
 
 from .config import (
-    DEVICE_OFFLINE_TIMEOUT, FREE_TRIAL_TRAFFIC_MB, PORTAL_TOKEN_EXPIRE, SESSION_IDLE_TIMEOUT,
+    DEVICE_OFFLINE_TIMEOUT, FREE_TRIAL_TRAFFIC_MB, ONLINE_WINDOW_SECONDS, PORTAL_TOKEN_EXPIRE,
+    SESSION_IDLE_TIMEOUT,
 )
 from .models import (
     AuthLog, Device, IpWhitelist, MacBlacklist, MacWhitelist, Order, Plan, Session,
@@ -153,10 +154,20 @@ def get_active_subscription(db, user_id: int) -> Optional[Subscription]:
     return chosen
 
 
+def is_session_online(sess: Session, now: Optional[datetime] = None) -> bool:
+    """会话是否真的在线：status=1 且最近一次网关上报在有效窗口内。
+    只看 status 会把网关掉线/路由器重启后的僵尸会话一直算作在线。"""
+    if not sess or sess.status != 1 or not sess.last_update_at:
+        return False
+    now = now or datetime.now()
+    return (now - sess.last_update_at) <= timedelta(seconds=ONLINE_WINDOW_SECONDS)
+
+
 def online_device_count(db, user_id: int, exclude_session_id: int = None, exclude_mac: str = "") -> int:
     """在线设备数；可排除正在判定的会话/同 MAC 旧会话，避免把自己算进配额。"""
+    cutoff = datetime.now() - timedelta(seconds=ONLINE_WINDOW_SECONDS)
     q = db.query(func.count(Session.id)).filter(
-        Session.user_id == user_id, Session.status == 1
+        Session.user_id == user_id, Session.status == 1, Session.last_update_at >= cutoff
     )
     if exclude_session_id:
         q = q.filter(Session.id != exclude_session_id)
@@ -276,6 +287,22 @@ def get_session(db, token: str) -> Optional[Session]:
     return db.query(Session).filter(Session.token == token).first()
 
 
+def active_session_for_device(db, user_id: int, mac: str) -> Optional[Session]:
+    """同一用户、同一 MAC 当前仍在线的会话；用于自动识别时复用 token，避免每次刷新都新建会话。"""
+    mac = (mac or "").lower()
+    if not user_id or not mac:
+        return None
+    sess = (
+        db.query(Session)
+        .filter(Session.user_id == user_id, Session.mac == mac, Session.status == 1)
+        .order_by(Session.last_update_at.desc(), Session.id.desc())
+        .first()
+    )
+    if sess and not token_expired(sess):
+        return sess
+    return None
+
+
 def token_expired(sess: Session) -> bool:
     """上网 token 是否已过期（自签发起超过有效期）。白名单固定 token 永不过期。"""
     if sess.token.startswith("wl-"):
@@ -291,13 +318,40 @@ def close_session(db, token: str):
         db.commit()
 
 
+def close_sessions_for_mac(db, mac: str) -> int:
+    """立即把某 MAC 的所有在线会话置为离线（拉黑/踢线时使用）。"""
+    mac = (mac or "").lower()
+    if not mac:
+        return 0
+    rows = db.query(Session).filter(Session.mac == mac, Session.status == 1).all()
+    now = datetime.now()
+    for s in rows:
+        s.status = 0
+        s.stop_at = now
+    if rows:
+        db.commit()
+    return len(rows)
+
+
 def update_traffic(db, sess: Session, incoming: int, outgoing: int, sub: Optional[Subscription]):
-    """wifidog counters 上报的是自连接以来的累计字节数，取增量计入订阅。"""
+    """wifidog counters 上报的是自连接以来的累计字节数，取增量计入订阅。
+
+    同时把最近一次上下行速率落到 sessions 表，保证后台/门户读数据库就能拿到
+    与网关上报一致的速率，不依赖单进程内存缓存。
+    """
+    now = datetime.now()
+    polled_at = sess.last_update_at or now
     inc_delta = max(0, incoming - (sess.incoming_bytes or 0))
     out_delta = max(0, outgoing - (sess.outgoing_bytes or 0))
     sess.incoming_bytes = incoming
     sess.outgoing_bytes = outgoing
-    sess.last_update_at = datetime.now()
+    sess.last_update_at = now
+
+    elapsed = (now - polled_at).total_seconds()
+    if elapsed >= 0.5:
+        sess.down_mbps = round(inc_delta * 8 / elapsed / 1_000_000, 3)
+        sess.up_mbps = round(out_delta * 8 / elapsed / 1_000_000, 3)
+        sess.last_rate_at = now
 
     if sub and sub.traffic_total_mb > 0:
         used_mb = (inc_delta + out_delta) / 1024 / 1024
@@ -350,6 +404,22 @@ def write_log(db, action: str, result: str, user_id=None, phone="", gw_id="", ma
     db.add(AuthLog(user_id=user_id, phone=phone, gw_id=gw_id, mac=mac, ip=ip,
                    action=action, result=result, reason=reason))
     db.commit()
+
+
+def mark_authenticated(db, sess: Session, action: str = "login", user_id=None, phone="",
+                       gw_id="", mac="", ip="", reason="") -> bool:
+    """一条会话只记一次成功认证，避免门户登录 + 网关 /auth + gwstats 重复计数。"""
+    if not sess or getattr(sess, "auth_logged", False):
+        return False
+    sess.auth_logged = True
+    db.add(AuthLog(
+        user_id=user_id if user_id is not None else sess.user_id,
+        phone=phone or "", gw_id=gw_id or sess.gw_id or "",
+        mac=mac or sess.mac or "", ip=ip or sess.ip or "",
+        action=action, result="success", reason=reason or "",
+    ))
+    db.commit()
+    return True
 
 
 def touch_device(db, gw_id: str, ip: str, uptime: int, memfree: int, load: float,
@@ -490,6 +560,13 @@ def refund_order(db, order: Order, reason: str = "", channel_refunded: bool = Fa
         if sub.status == 1:
             sub.status = 0          # 停用
             stopped += 1
+
+    # 退款立即断网：旧 token 不能靠 gwstats 重新变成在线
+    sessions = db.query(Session).filter(Session.user_id == order.user_id, Session.status == 1).all()
+    for s in sessions:
+        s.status = 0
+        s.stop_at = datetime.now()
+        s.revoked = True
 
     order.status = 3
     order.refund_at = datetime.now()
