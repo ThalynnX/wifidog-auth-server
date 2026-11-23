@@ -51,7 +51,6 @@ echo "[2/4] Nuitka 编译（onedir，包含模板/静态资源）"
   --include-package=pymysql \
   --include-data-dir=app/templates=app/templates \
   --include-data-dir=app/static=app/static \
-  --nofollow-import-to=license_server \
   --nofollow-import-to=tests \
   --nofollow-import-to=tkinter \
   --nofollow-import-to=unittest \
@@ -80,7 +79,6 @@ fi
 mkdir -p "$DIST_DIR/data" "$DIST_DIR/logs"
 cp -f "$ROOT/.env.example" "$DIST_DIR/.env.example"
 cp -f "$ROOT/README.md" "$DIST_DIR/README.md"
-cp -f "$ROOT/docs/LICENSING.md" "$DIST_DIR/LICENSING.md" 2>/dev/null || true
 if [ -f "$ROOT/LICENSE" ]; then cp -f "$ROOT/LICENSE" "$DIST_DIR/LICENSE" 2>/dev/null || true; fi
 cat > "$DIST_DIR/run.sh" <<'SH'
 #!/usr/bin/env bash
