@@ -39,6 +39,10 @@ class User(Base, TimestampMixin):
     mac = Column(String(32), default="", nullable=True)  # 已认证绑定的设备 MAC
     mac_updated_at = Column(DateTime, nullable=True)
     mac_change_count = Column(Integer, default=0, nullable=False)
+    # 当前 30 天周期内允许自助换绑的次数；后台可按用户增减
+    device_change_limit = Column(Integer, default=3, nullable=False)
+    # 当前换绑额度周期的起点；为空时首次换绑开始计时
+    device_change_window_start = Column(DateTime, nullable=True)
 
     last_login_at = Column(DateTime, nullable=True)
     last_login_ip = Column(String(64), default="")

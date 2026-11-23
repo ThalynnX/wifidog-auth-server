@@ -48,6 +48,8 @@ def _migrate():
             "alipay_nickname": "VARCHAR(128) DEFAULT ''",
             "alipay_avatar": "VARCHAR(255) DEFAULT ''",
             "alipay_bound_at": "DATETIME",
+            "device_change_limit": "INTEGER NOT NULL DEFAULT 3",
+            "device_change_window_start": "DATETIME",
         },
         "orders": {
             "refund_no": "VARCHAR(64) DEFAULT ''",

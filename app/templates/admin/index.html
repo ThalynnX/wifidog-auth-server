@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#07111d">
 <title>{{ site_name }} · 运营控制台</title>
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/static/ui.css?v=2.0.2">
+<link rel="stylesheet" href="/static/ui.css?v=2.0.3">
 </head>
 <body>
 <div class="admin-shell">
@@ -29,7 +29,7 @@
       <button class="nav-btn" data-page="logs" type="button"><svg viewBox="0 0 24 24"><path d="M5 3h14v18H5zM8 8h8M8 12h8M8 16h5"/></svg><span>认证日志</span></button>
       <button class="nav-btn" data-page="settings" type="button"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg><span>系统设置</span></button>
     </nav>
-    <div class="sidebar-foot">WIFIDOG AUTH SERVER<br>BUILD 2.0.2 · FASTAPI</div>
+    <div class="sidebar-foot">WIFIDOG AUTH SERVER<br>BUILD 2.0.3 · FASTAPI</div>
   </aside>
   <div class="sidebar-mask hide" id="sidebarMask"></div>
 
@@ -56,7 +56,7 @@
       </section>
 
       <section class="page" id="page-users">
-        <div class="panel"><div class="panel-head"><div><div class="panel-title">用户管理</div><div class="panel-desc">查询账号、开通套餐、禁用或恢复用户</div></div><div class="toolbar"><input class="input" id="uq" placeholder="手机号 / 用户名 / 昵称" maxlength="64"><button class="btn secondary" id="userSearch" type="button">搜索</button><button class="btn ghost" id="userRefresh" type="button">刷新</button></div></div><div class="panel-body flush"><div id="usersBox"></div><div id="usersPager"></div></div></div>
+        <div class="panel"><div class="panel-head"><div><div class="panel-title">用户管理</div><div class="panel-desc">查询账号、开通套餐、控制绑定设备与换绑额度、禁用或删除用户</div></div><div class="toolbar"><input class="input" id="uq" placeholder="手机号 / 用户名 / 昵称" maxlength="64"><button class="btn secondary" id="userSearch" type="button">搜索</button><button class="btn ghost" id="userRefresh" type="button">刷新</button></div></div><div class="panel-body flush"><div id="usersBox"></div><div id="usersPager"></div></div></div>
       </section>
 
       <section class="page" id="page-devices">
@@ -109,7 +109,7 @@
   </main>
 </div>
 <div id="modalRoot"></div>
-<script src="/static/ui.js?v=2.0.2"></script>
+<script src="/static/ui.js?v=2.0.3"></script>
 <script>
 const $ = id => document.getElementById(id);
 const state = { devices: [], plans: [], sessions: [], orders: [], usersPage: 1, ordersPage: 1, logsPage: 1, current: 'dash' };
@@ -223,22 +223,25 @@ async function loadUsers(page = 1) {
   const q = $('uq').value.trim(); state.usersPage = Math.max(1, page);
   const r = await UI.api('/admin/api/users?q=' + encodeURIComponent(q) + '&page=' + state.usersPage + '&size=20');
   if (!r.ok) { $('usersBox').innerHTML = ''; $('usersPager').innerHTML = ''; return UI.toast(r.msg || '用户加载失败', 'error'); }
-  $('usersBox').innerHTML = UI.table(['ID', '手机号 / 用户名', '昵称', '当前套餐', '到期时间', '在线', '状态', '注册时间', '操作'], (r.rows || []).map(u => [
+  $('usersBox').innerHTML = UI.table(['ID', '手机号 / 用户名', '昵称', '当前套餐', '到期时间', '绑定设备', '换绑额度', '在线', '状态', '注册时间', '操作'], (r.rows || []).map(u => [
     u.id, '<span class="mono">' + UI.esc(u.phone || u.username || '-') + '</span>', UI.esc(u.nickname || '-'),
-    u.plan ? UI.esc(u.plan) : '<span class="tag neutral">无套餐</span>', UI.esc(u.expire_at || '-'), u.online,
+    u.plan ? UI.esc(u.plan) : '<span class="tag neutral">无套餐</span>', UI.esc(u.expire_at || '-'),
+    u.mac_masked ? '<span class="mono">' + UI.esc(u.mac_masked) + '</span>' : '<span class="tag neutral">未绑定</span>',
+    '<span class="tag ' + (u.device_remaining > 0 ? 'info' : 'bad') + '">已用 ' + u.device_used + ' / ' + u.device_limit + '</span><br><span class="muted">剩余 ' + u.device_remaining + ' 次</span>',
+    u.online,
     u.status === 1 ? '<span class="tag">正常</span>' : '<span class="tag bad">禁用</span>', UI.esc(u.created_at),
-    '<div class="actions"><button class="btn small secondary" onclick="subscribeUser(' + u.id + ')">开通套餐</button><button class="btn small ' + (u.status === 1 ? 'danger' : '') + '" onclick="toggleUser(' + u.id + ',' + u.status + ')">' + (u.status === 1 ? '禁用' : '启用') + '</button></div>'
+    '<div class="actions"><button class="btn small secondary" onclick="openUserControl(' + u.id + ')">控制</button><button class="btn small secondary" onclick="subscribeUser(' + u.id + ')">套餐</button><button class="btn small ' + (u.status === 1 ? 'danger' : '') + '" onclick="toggleUser(' + u.id + ',' + u.status + ')">' + (u.status === 1 ? '禁用' : '启用') + '</button></div>'
   ]), '完成门户登录后才会产生用户；白名单设备请到在线会话查看');
   $('usersPager').innerHTML = UI.pager('users', state.usersPage, 20, r.total, 'loadUsers');
 }
 $('userSearch').onclick = () => loadUsers(1); $('userRefresh').onclick = () => loadUsers(state.usersPage);
 $('uq').onkeydown = e => { if (e.key === 'Enter') loadUsers(1); };
-async function toggleUser(id, status) {
+async function toggleUser(id, status, refreshControl = false) {
   const yes = await UI.confirm({title: status === 1 ? '禁用用户' : '恢复用户', text: status === 1 ? '禁用后，该用户的在线会话会立即结束。确认继续？' : '确认恢复该用户的正常状态？', okText: status === 1 ? '确认禁用' : '确认恢复', danger: status === 1});
   if (!yes) return;
   const r = await UI.post('/admin/api/users/' + id + '/toggle');
   UI.toast(r.ok ? (r.status === 1 ? '用户已恢复' : '用户已禁用并踢下线') : (r.msg || '操作失败'), r.ok ? 'ok' : 'error');
-  if (r.ok) loadUsers(state.usersPage);
+  if (r.ok) { loadUsers(state.usersPage); if (refreshControl) openUserControl(id); }
 }
 async function subscribeUser(id) {
   const r = await UI.api('/admin/api/plans');
@@ -252,6 +255,142 @@ async function subscribeUser(id) {
       const res = await UI.post('/admin/api/users/' + id + '/subscribe', {plan_id: planId});
       if (res.ok) { UI.toast(res.msg || '套餐已开通'); loadUsers(state.usersPage); return true; }
       return res.msg || '开通失败';
+    }});
+}
+
+function closeModals() {
+  document.querySelectorAll('.modal-layer').forEach(el => el.remove());
+}
+
+function userExpectedConfirm(u) {
+  return u.phone || u.username || String(u.id);
+}
+
+async function openUserControl(id) {
+  closeModals();
+  const r = await UI.api('/admin/api/users/' + id);
+  if (!r.ok) return UI.toast(r.msg || '用户详情加载失败', 'error');
+  const u = r.user;
+  const sessions = r.sessions || [];
+  const quotaClass = u.device_remaining > 0 ? 'info' : 'bad';
+  const body = '<div class="form-grid">' +
+    '<div class="field"><label>账号</label><div class="mono">' + UI.esc(u.phone || u.username || '-') + '</div></div>' +
+    '<div class="field"><label>昵称 / 状态</label><div>' + UI.esc(u.nickname || '-') + ' · ' + (u.status === 1 ? '<span class="tag">正常</span>' : '<span class="tag bad">禁用</span>') + '</div></div>' +
+    '<div class="field"><label>当前套餐</label><div>' + (u.plan ? UI.esc(u.plan) : '<span class="muted">无套餐</span>') + '</div></div>' +
+    '<div class="field"><label>到期时间</label><div>' + UI.esc(u.expire_at || '-') + '</div></div>' +
+    '<div class="field"><label>余额</label><div class="mono">' + UI.money(u.balance) + '</div></div>' +
+    '<div class="field"><label>注册 / 最近登录</label><div>' + UI.esc(u.created_at) + '<br><span class="muted">' + UI.esc(u.last_login_at || '未登录') + ' · ' + UI.esc(u.last_login_ip || '-') + '</span></div></div>' +
+    '</div>' +
+    '<div class="notice"><strong>绑定设备：</strong><span class="mono">' + UI.esc(u.mac || '未绑定') + '</span><br>' +
+    '<span class="muted">上次绑定：' + UI.esc(u.mac_updated_at || '-') + '</span></div>' +
+    '<div class="panel" style="margin-top:14px"><div class="panel-head"><div><div class="panel-title">更换设备额度</div><div class="panel-desc">每 ' + 30 + ' 天一个周期；管理员增减的是上限，不是直接改已用次数。</div></div><span class="tag ' + quotaClass + '">剩余 ' + u.device_remaining + ' 次</span></div><div class="panel-body">' +
+    '<div class="notice">本周期已用 <strong>' + u.device_used + '</strong> / 上限 <strong>' + u.device_limit + '</strong> 次；周期 ' + UI.esc(u.device_window_start || '未开始') + ' ~ ' + UI.esc(u.device_window_end || '-') + '</div>' +
+    '<div class="actions" style="margin-top:12px"><button class="btn small secondary" onclick="userQuota(' + u.id + ',1)">＋1 次</button><button class="btn small secondary" onclick="userQuota(' + u.id + ',-1)">－1 次</button><button class="btn small secondary" onclick="openQuotaSet(' + u.id + ',' + u.device_limit + ')">设置上限</button><button class="btn small ghost" onclick="resetUserQuota(' + u.id + ')">重置已用</button></div>' +
+    '</div></div>' +
+    '<div class="panel" style="margin-top:14px"><div class="panel-head"><div><div class="panel-title">设备控制</div><div class="panel-desc">解绑或改绑会结束当前在线会话；管理员操作不计入自助换绑次数。</div></div><div class="actions"><button class="btn small secondary" onclick="openBindDevice(' + u.id + ')">改绑 MAC</button><button class="btn small danger" onclick="unbindUserDevice(' + u.id + ')">解绑当前设备</button></div></div>' +
+    (sessions.length ? UI.table(['网关', 'MAC', 'IP', '最近上报', '操作'], sessions.map(s => [UI.esc(s.gw_id || '-'), '<span class="mono">' + UI.esc(s.mac || '-') + '</span>', '<span class="mono">' + UI.esc(s.ip || '-') + '</span>', UI.esc(s.last_update_at), '<button class="btn small danger" onclick="kickUserSession(' + s.id + ',' + u.id + ')">踢下线</button>'])) : '<div class="empty" style="padding:18px">当前没有在线会话</div>') +
+    '</div>' +
+    '<div class="panel" style="margin-top:14px"><div class="panel-head"><div><div class="panel-title">账号操作</div><div class="panel-desc">删除会清空账号、订阅和会话；订单保留用于审计。</div></div></div><div class="panel-body"><div class="actions">' +
+    '<button class="btn small ' + (u.status === 1 ? 'danger' : '') + '" onclick="toggleUser(' + u.id + ',' + u.status + ',true)">' + (u.status === 1 ? '禁用账号' : '恢复账号') + '</button>' +
+    '<button class="btn small danger" onclick="deleteUser(' + u.id + ')">删除用户</button>' +
+    '</div></div></div>';
+  const layer = openModal({title: '用户控制 · ' + (u.nickname || u.phone || ('#' + u.id)), body: body, okText: '关闭', onOk: () => true});
+  return layer;
+}
+
+async function userQuota(id, delta) {
+  closeModals();
+  const r = await UI.post('/admin/api/users/' + id + '/device-quota', {delta: delta});
+  if (!r.ok) return UI.toast(r.msg || '额度调整失败', 'error');
+  UI.toast('换绑额度已更新：上限 ' + r.device_limit + ' 次，剩余 ' + r.device_remaining + ' 次');
+  loadUsers(state.usersPage);
+  openUserControl(id);
+}
+
+function openQuotaSet(id, current) {
+  closeModals();
+  openModal({title: '设置换绑上限 · 用户 #' + id,
+    body: '<div class="field"><label>本周期最多可自助换绑次数</label><input class="input" id="q_limit" type="number" min="0" max="100" value="' + Number(current || 0) + '"><span class="help">0 表示禁止自助换绑；管理员仍可在设备控制里直接改绑。</span></div>',
+    okText: '保存上限',
+    onOk: async layer => {
+      const limit = Number(layer.querySelector('#q_limit').value);
+      if (!Number.isInteger(limit) || limit < 0 || limit > 100) return '请输入 0-100 的整数';
+      const r = await UI.post('/admin/api/users/' + id + '/device-quota', {limit: limit});
+      if (!r.ok) return r.msg || '保存失败';
+      UI.toast('换绑上限已设为 ' + r.device_limit + ' 次');
+      loadUsers(state.usersPage);
+      openUserControl(id);
+      return true;
+    }});
+}
+
+async function resetUserQuota(id) {
+  const yes = await UI.confirm({title: '重置换绑已用次数', text: '这会把本周期已用次数清零，并重新开始 30 天周期。确认继续？', okText: '确认重置', danger: false});
+  if (!yes) return;
+  closeModals();
+  const r = await UI.post('/admin/api/users/' + id + '/device-quota', {reset_used: true});
+  if (!r.ok) return UI.toast(r.msg || '重置失败', 'error');
+  UI.toast('已重置，本周期剩余 ' + r.device_remaining + ' 次');
+  loadUsers(state.usersPage);
+  openUserControl(id);
+}
+
+function openBindDevice(id) {
+  closeModals();
+  openModal({title: '改绑用户设备 · 用户 #' + id,
+    body: '<div class="field"><label>新设备 MAC</label><input class="input mono" id="bind_mac" maxlength="17" placeholder="00:11:22:33:44:55"><span class="help">支持冒号或短横线格式；保存后旧设备会立即下线，不计入自助换绑次数。</span></div>',
+    okText: '确认改绑', danger: true,
+    onOk: async layer => {
+      const mac = layer.querySelector('#bind_mac').value.trim();
+      if (!mac) return '请输入 MAC';
+      const r = await UI.post('/admin/api/users/' + id + '/device', {mac: mac, kick: true});
+      if (!r.ok) return r.msg || '改绑失败';
+      UI.toast(r.msg + '，已踢下线 ' + r.kicked + ' 个会话');
+      loadUsers(state.usersPage);
+      openUserControl(id);
+      return true;
+    }});
+}
+
+async function unbindUserDevice(id) {
+  const yes = await UI.confirm({title: '解绑当前设备', text: '解绑后该用户下次认证会重新绑定设备，当前在线会话会被踢下线。确认继续？', okText: '确认解绑', danger: true});
+  if (!yes) return;
+  closeModals();
+  const r = await UI.post('/admin/api/users/' + id + '/device', {mac: '', kick: true});
+  if (!r.ok) return UI.toast(r.msg || '解绑失败', 'error');
+  UI.toast(r.msg + '，已踢下线 ' + r.kicked + ' 个会话');
+  loadUsers(state.usersPage);
+  openUserControl(id);
+}
+
+async function kickUserSession(sid, uid) {
+  const yes = await UI.confirm({title: '踢下线', text: '确认结束该会话？如果网关在线会立即下发断网指令。', okText: '确认踢下线', danger: true});
+  if (!yes) return;
+  closeModals();
+  const r = await UI.post('/admin/api/sessions/' + sid + '/kick', {});
+  UI.toast(r.ok ? (r.msg || '已踢下线') : (r.msg || '操作失败'), r.ok ? 'ok' : 'error');
+  if (r.ok) { loadUsers(state.usersPage); openUserControl(uid); }
+}
+
+async function deleteUser(id) {
+  const r = await UI.api('/admin/api/users/' + id);
+  if (!r.ok) return UI.toast(r.msg || '用户详情加载失败', 'error');
+  const u = r.user;
+  const expected = userExpectedConfirm(u);
+  closeModals();
+  openModal({title: '删除用户 · ' + (u.nickname || expected), danger: true, okText: '确认删除',
+    body: '<div class="notice" style="border-color:rgba(255,90,90,.35)">删除会立即结束该用户所有会话、清空绑定设备、删除订阅和验证码；<strong>历史订单保留用于财务审计</strong>。此操作不可撤销。</div>' +
+      '<div class="field"><label>输入账号确认</label><input class="input mono" id="del_confirm" placeholder="' + UI.esc(expected) + '"><span class="help">请输入 ' + UI.esc(expected) + ' 才会执行删除。</span></div>' +
+      '<label style="display:flex;gap:8px;align-items:center;margin-top:12px;color:var(--muted)"><input type="checkbox" id="del_force"> 该用户有生效套餐，仍然强制删除</label>',
+    onOk: async layer => {
+      const confirm = layer.querySelector('#del_confirm').value.trim();
+      if (confirm !== expected) return '确认账号不匹配';
+      const force = layer.querySelector('#del_force').checked;
+      const res = await UI.post('/admin/api/users/' + id + '/delete', {confirm: confirm, force: force});
+      if (!res.ok) return res.msg || '删除失败';
+      UI.toast(res.msg || '用户已删除');
+      loadUsers(state.usersPage);
+      return true;
     }});
 }
 

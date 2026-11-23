@@ -151,7 +151,7 @@
 ```bash
 # 在路由器上（或电脑下载后用 scp 传上去）
 cd /tmp
-wget https://github.com/your-account/wifidog-auth-server/releases/download/v1.1.2/apfree-wifidog-luci-full-aarch64.tar.gz
+wget https://github.com/ThalynnX/wifidog-auth-server/releases/download/v1.1.2/apfree-wifidog-luci-full-aarch64.tar.gz
 ```
 
 ### 4.2 方式一：全量包手动安装（最稳，推荐）

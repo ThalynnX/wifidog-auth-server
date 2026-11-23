@@ -241,8 +241,34 @@ WIFIDOG_WECHAT_NOTIFY_URL=https://portal.example.com/portal/api/pay/notify/wecha
 | GET | `/admin/api/me` | 当前管理员 |
 | GET | `/admin/api/stats` | 概览数据 |
 | GET | `/admin/api/users?q=&page=&size=` | 用户列表 |
+| GET | `/admin/api/users/{uid}` | 用户详情、绑定设备、在线会话与换绑额度 |
 | POST | `/admin/api/users/{uid}/toggle` | 禁用/启用 |
 | POST | `/admin/api/users/{uid}/subscribe` | 手动开通套餐 |
+| POST | `/admin/api/users/{uid}/device-quota` | 增减换绑上限、设置上限或重置已用次数 |
+| POST | `/admin/api/users/{uid}/device` | 解绑或改绑用户设备，可立即踢线 |
+| POST | `/admin/api/users/{uid}/delete` | 删除用户；需账号确认，有生效套餐需强制确认 |
+
+### 用户设备控制请求
+
+```json
+POST /admin/api/users/12/device-quota
+{"delta": 1}                 // 上限 +1；delta=-1 为减少
+{"limit": 5}                 // 直接设置本周期上限
+{"reset_used": true}         // 已用次数清零并开启新 30 天周期
+```
+
+```json
+POST /admin/api/users/12/device
+{"mac": "", "kick": true}                       // 解绑
+{"mac": "00:11:22:33:44:55", "kick": true}      // 改绑并踢掉旧会话
+```
+
+```json
+POST /admin/api/users/12/delete
+{"confirm": "13800138000", "force": false}
+```
+
+删除会清理订阅、会话和验证码，**保留订单**用于财务审计；`confirm` 必须等于手机号/用户名/用户 ID。有生效套餐时需 `force=true`。
 | GET/POST | `/admin/api/devices` | 网关列表 / 新增 |
 | DELETE | `/admin/api/devices/{did}` | 删除网关 |
 | GET/POST | `/admin/api/plans` | 套餐列表 / 新增或修改 |

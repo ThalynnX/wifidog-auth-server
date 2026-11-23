@@ -2,13 +2,13 @@
 """Build WiFiDog release tarballs from the current Git HEAD.
 
 Usage:
-    python3 scripts/build_release.py --version v2.0.2
+    python3 scripts/build_release.py --version v2.0.3
 
 Outputs to ./dist:
-    wifidog-portal-v2.0.2-full.tar.gz
-    wifidog-portal-v2.0.2-server.tar.gz
+    wifidog-portal-v2.0.3-full.tar.gz
+    wifidog-portal-v2.0.3-server.tar.gz
     router packages copied from router-packages/
-    RELEASE-NOTES-v2.0.2.md
+    RELEASE-NOTES-v2.0.3.md
     SHA256SUMS.txt
 """
 from __future__ import annotations
@@ -54,7 +54,7 @@ def make_tar(src: Path, out: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--version", required=True, help="e.g. v2.0.2")
+    parser.add_argument("--version", required=True, help="e.g. v2.0.3")
     args = parser.parse_args()
 
     version = args.version

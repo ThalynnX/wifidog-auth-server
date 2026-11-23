@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688)](https://fastapi.tiangolo.com/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.0.2-orange)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v2.0.3-orange)](CHANGELOG.md)
 
 </div>
 
@@ -45,7 +45,7 @@
 
 > **重要说明：仓库主线已切换**
 >
-> 本仓库早期版本（tag [`node-v3.0.0`](https://github.com/your-account/wifidog-auth-server/releases/tag/node-v3.0.0)）是一套 Node.js + Express + FreeRADIUS
+> 本仓库早期版本（tag [`node-v3.0.0`](https://github.com/ThalynnX/wifidog-auth-server/releases/tag/node-v3.0.0)）是一套 Node.js + Express + FreeRADIUS
 > 的实验性实现，**并未在实际生产环境运行**。当前 `main` 分支为生产环境实际运行的 Python/FastAPI 版本，
 > 功能更完整（套餐计费、支付回调、设备绑定、MAC/IP 黑白名单、管理后台、实时统计）。
 > 如需旧实现，请检出 `node-v3.0.0` 标签。
@@ -100,8 +100,9 @@
 ### 2.4 设备与用户管理
 
 - 多网关管理：网关 ID、名称、安装位置、共享密钥、在线状态、系统负载、最后上报 IP
-- 用户管理：禁用/启用、手动开通套餐、查看绑定设备与订单
-- 设备绑定：一个账号可绑定 MAC，支持换绑（有次数限制，防共享账号）
+- 用户管理：禁用/启用、删除账号、手动开通套餐、查看绑定设备与订单
+- 设备绑定：一个账号可绑定 MAC，支持换绑（默认每 30 天 3 次，可按用户增减额度、重置周期）
+- 设备控制：后台可解绑/改绑用户设备、踢下线；管理员操作不计入自助换绑次数
 - 在线会话：查看当前在线用户、IP、MAC、套餐、已用流量，支持一键踢下线
 - 认证日志：完整记录登录、认证、计费、踢线、失败原因
 
@@ -270,7 +271,7 @@ passlib  bcrypt  PyJWT  requests  cryptography>=42
 
 ```bash
 # 1) 拉取源码
-git clone https://github.com/your-account/wifidog-auth-server.git
+git clone https://github.com/ThalynnX/wifidog-auth-server.git
 cd wifidog-auth-server
 
 # 2) 创建虚拟环境并安装依赖
@@ -320,7 +321,7 @@ useradd -r -s /usr/sbin/nologin wifidog || true
 mkdir -p /opt/wifidog && chown -R wifidog:wifidog /opt/wifidog
 
 # ③ 部署代码（二选一）
-git clone https://github.com/your-account/wifidog-auth-server.git /opt/wifidog
+git clone https://github.com/ThalynnX/wifidog-auth-server.git /opt/wifidog
 # 或解压 Release 里的 wifidog-portal-v1.1.2-full.tar.gz 到 /opt/wifidog
 
 # ④ 虚拟环境
@@ -517,7 +518,7 @@ ClientTimeout 10
 | 模块 | 能力 |
 |---|---|
 | 数据概览 | 用户数、在线数、今日订单/收入、网关在线状态 |
-| 用户管理 | 搜索、禁用/启用、手动开通套餐、查看绑定设备 |
+| 用户管理 | 搜索、禁用/启用、删除账号、手动开通套餐、查看/解绑/改绑设备、调整换绑额度 |
 | 设备管理 | 网关增删改、在线状态、最后上报时间/IP、系统负载 |
 | 套餐管理 | 新增/编辑/上下架、时长/流量/周期、限速、设备数 |
 | 订单管理 | 按状态筛选、查看支付流水、标记退款 |
@@ -528,7 +529,16 @@ ClientTimeout 10
 | 认证日志 | 登录、认证、计费、踢线、失败原因 |
 | 系统设置 | 运行模式、站点名称、公告、免费时长、设备数、修改密码 |
 
-### v2.0.2 实时数据一致性与多 worker（当前）
+### v2.0.3 用户与设备控制（当前）
+
+- 每个用户拥有独立的 30 天换绑额度，默认 3 次，后台可按用户 `+1` / `-1`、直接设置上限或重置已用次数。
+- 后台新增「用户控制」面板：查看绑定 MAC、上次绑定时间、在线会话，支持解绑/改绑设备、踢下线、禁用/恢复、删除用户。
+- 管理员直接解绑/改绑不计入用户自助换绑次数；额度为 0 时禁止用户自助换绑，管理员仍可直接处理。
+- 删除用户需输入手机号/用户名/ID 确认；有生效套餐时需强制确认。删除会清理订阅、会话、验证码和账号，保留订单用于财务审计。
+- 新增 `device_change_limit`、`device_change_window_start` 两列，旧库启动时自动迁移，存量用户默认 3 次。
+- 本次发布不包含尚未部署的授权模块。
+
+### v2.0.2 实时数据一致性与多 worker
 
 - 在线判定统一为“最近 120 秒有网关上报”，踢线/退款/禁用后的旧 token 不会复活。
 - 新增 Redis Pub/Sub WS 总线，后台统计、设备在线和门户状态在多 worker 下保持一致。
@@ -664,17 +674,19 @@ tar czf /backup/wifidog-conf-$(date +%F).tar.gz /opt/wifidog/.env
 
 ## 15. 下载与版本
 
-### 当前版本：v2.0.2（实时数据一致性与多 worker）
+### 当前版本：v2.0.3（用户与设备控制）
 
-本次更新：在线判定统一按网关最近 120 秒上报；踢线、退款、禁用后的旧 token 不再复活；新增 Redis WS 总线支持多 worker；后台与门户关键页面 3–5 秒实时同步；网关统计密钥改为环境变量；新增 `docs/schema.sql` 与 `docs/DATABASE.md`，15 张表结构可审计、可空库初始化。
+本次更新：新增用户级 30 天换绑额度（默认 3 次，可按用户增减/设置/重置）；后台用户控制面板支持查看绑定设备与在线会话、解绑/改绑、踢下线、禁用/恢复和删除用户；删除用户保留订单用于审计；旧库自动迁移两个新字段。
 
-最新 Release：[v2.0.2 下载与更新说明](https://github.com/your-account/wifidog-auth-server/releases/tag/v2.0.2)
+最新 Release：[v2.0.3 下载与更新说明](https://github.com/ThalynnX/wifidog-auth-server/releases/tag/v2.0.3)
 
 | 资产 | 内容 |
 |---|---|
-| `wifidog-portal-v2.0.2-full.tar.gz` | **完整源码包**：服务端代码 + 部署脚本 + 全部文档 + 数据库结构 + 验收脚本 + 路由器包 |
-| `wifidog-portal-v2.0.2-server.tar.gz` | 仅服务端源码、部署文档、数据库结构与验收脚本（不含路由器二进制包） |
-| `RELEASE-NOTES-v2.0.2.md` | 本版本更新内容、部署顺序与验收边界 |
+| `wifidog-portal-v2.0.3-full.tar.gz` | **完整源码包**：服务端代码 + 部署脚本 + 全部文档 + 数据库结构 + 验收脚本 + 路由器包 |
+| `wifidog-portal-v2.0.3-server.tar.gz` | 仅服务端源码、部署文档、数据库结构与验收脚本（不含路由器二进制包） |
+| `RELEASE-NOTES-v2.0.3.md` | 本版本更新内容、部署顺序与验收边界 |
+| `wifidog-server-2.0.3-linux-x86_64.tar.gz` | Nuitka 编译交付包：不含 `.py` 源码，含运行所需资源 |
+| `wifidog-portal-v2.0.3-offline-x86_64.tar.gz` | 离线部署包：内置 Python 运行时、wheels、Redis 与安装脚本 |
 | `apfree-wifidog-*.apk` | 路由器 wifidogx 主程序（沿用已验证版本） |
 | `luci-app-apfree-wifidog-*.apk` | LuCI 配置界面（沿用已验证版本） |
 | `luci-i18n-apfree-wifidog-zh-cn-*.apk` | 中文语言包（沿用已验证版本） |
@@ -682,15 +694,7 @@ tar czf /backup/wifidog-conf-$(date +%F).tar.gz /opt/wifidog/.env
 | `apfree-wifidog-luci-full-aarch64.tar.gz` | 含 wifidogx/wdctlx/init.d/配置模板的全量包（沿用已验证版本） |
 | `SHA256SUMS.txt` | 本 Release 全部下载资产的 SHA256 校验和 |
 
-> 本次未单独发布 `acceptance` 打包资产；接口/CI 检查结果与已知验收边界见 `CHANGELOG.md` 和 `RELEASE-NOTES-v2.0.2.md`。
-
-下载后校验：
-
-```bash
-sha256sum -c SHA256SUMS.txt
-```
-
-每个 Release 均标明版本号、更新内容、资产用途和验收边界；历史版本见 [Releases](https://github.com/your-account/wifidog-auth-server/releases) 与 [CHANGELOG.md](CHANGELOG.md)。
+> 本次未单独发布 `acceptance` 打包资产；接口/测试结果与已知验收边界见 `CHANGELOG.md` 和 `RELEASE-NOTES-v2.0.3.md`。
 
 ---
 

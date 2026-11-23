@@ -10,7 +10,11 @@ from datetime import datetime, timedelta
 from app.config import SECRET_KEY
 
 CHANGE_TOKEN_TTL = 900        # 换绑令牌有效期 15 分钟
-MAX_CHANGES_PER_30D = 3       # 每 30 天最多自助更换 3 次
+CHANGE_WINDOW_DAYS = 30       # 换绑额度周期
+DEFAULT_DEVICE_CHANGE_LIMIT = 3
+MAX_DEVICE_CHANGE_LIMIT = 100
+# 兼容旧常量名；实际额度以用户 device_change_limit 为准
+MAX_CHANGES_PER_30D = DEFAULT_DEVICE_CHANGE_LIMIT
 
 
 def normalize_mac(mac: str) -> str:
@@ -67,9 +71,69 @@ def verify_change_token(token: str):
         return None
 
 
+def _change_limit(user) -> int:
+    raw = getattr(user, "device_change_limit", DEFAULT_DEVICE_CHANGE_LIMIT)
+    if raw is None:
+        raw = DEFAULT_DEVICE_CHANGE_LIMIT
+    try:
+        limit = int(raw)
+    except (TypeError, ValueError):
+        limit = DEFAULT_DEVICE_CHANGE_LIMIT
+    return max(0, min(MAX_DEVICE_CHANGE_LIMIT, limit))
+
+
+def _window_start(user, used: int):
+    """返回当前额度周期起点；旧数据用最后一次换绑时间兜底。"""
+    start = getattr(user, "device_change_window_start", None)
+    if start is None and used > 0:
+        start = getattr(user, "mac_updated_at", None)
+    return start
+
+
+def quota_state(user, now: datetime | None = None) -> dict:
+    """返回用户当前换绑额度状态；不写数据库，供展示和校验共用。"""
+    now = now or datetime.now()
+    limit = _change_limit(user)
+    try:
+        used = max(0, int(getattr(user, "mac_change_count", 0) or 0))
+    except (TypeError, ValueError):
+        used = 0
+    start = _window_start(user, used)
+    expired = bool(start and (now - start) >= timedelta(days=CHANGE_WINDOW_DAYS))
+    effective_used = 0 if expired else used
+    effective_start = now if expired else start
+    remaining = max(0, limit - effective_used)
+    return {
+        "limit": limit,
+        "used": effective_used,
+        "remaining": remaining,
+        "window_start": effective_start,
+        "window_end": (
+            effective_start + timedelta(days=CHANGE_WINDOW_DAYS)
+            if effective_start else None
+        ),
+        "expired": expired,
+    }
+
+
+def _reset_window_if_needed(user, now: datetime) -> None:
+    """在真正换绑前推进周期，避免跨 30 天仍按旧计数拦截。"""
+    used = max(0, int(getattr(user, "mac_change_count", 0) or 0))
+    start = _window_start(user, used)
+    if start is None:
+        user.device_change_window_start = now
+        return
+    if (now - start) >= timedelta(days=CHANGE_WINDOW_DAYS):
+        user.device_change_window_start = now
+        user.mac_change_count = 0
+
+
 def bind(db, user, mac: str) -> None:
+    now = datetime.now()
     user.mac = normalize_mac(mac)
-    user.mac_updated_at = datetime.now()
+    user.mac_updated_at = now
+    if getattr(user, "device_change_window_start", None) is None:
+        user.device_change_window_start = now
     db.commit()
 
 
@@ -123,14 +187,16 @@ def rebind(db, user, mac: str):
     if get_bound_mac(user) == m:
         return True, "当前设备已经是您的绑定设备"
 
-    last = getattr(user, "mac_updated_at", None)
-    cnt = int(getattr(user, "mac_change_count", 0) or 0)
-    if last and (datetime.now() - last) < timedelta(days=30):
-        if cnt >= MAX_CHANGES_PER_30D:
-            return False, "30 天内更换设备次数已达上限，请联系客服处理"
-        user.mac_change_count = cnt + 1
-    else:
-        user.mac_change_count = 1
+    now = datetime.now()
+    _reset_window_if_needed(user, now)
+    state = quota_state(user, now)
+    if state["remaining"] <= 0:
+        return (
+            False,
+            f"本周期已更换 {state['used']} 次，上限 {state['limit']} 次，"
+            "次数已用完，请联系客服处理",
+        )
 
+    user.mac_change_count = state["used"] + 1
     bind(db, user, m)
     return True, "已更换绑定设备，现在可以直接上网了"

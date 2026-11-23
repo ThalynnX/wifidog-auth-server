@@ -71,7 +71,7 @@ mkdir -p /opt/wifidog/data /opt/wifidog/logs
 ### 方式 A：Git 克隆（推荐，便于升级）
 
 ```bash
-git clone https://github.com/your-account/wifidog-auth-server.git /opt/wifidog
+git clone https://github.com/ThalynnX/wifidog-auth-server.git /opt/wifidog
 cd /opt/wifidog
 git log -1 --oneline
 ```
@@ -80,8 +80,8 @@ git log -1 --oneline
 
 ```bash
 cd /tmp
-wget https://github.com/your-account/wifidog-auth-server/releases/download/v2.0.2/wifidog-portal-v2.0.2-full.tar.gz
-tar -xzf wifidog-portal-v2.0.2-full.tar.gz -C /opt/wifidog --strip-components=1
+wget https://github.com/ThalynnX/wifidog-auth-server/releases/download/v2.0.3/wifidog-portal-v2.0.3-full.tar.gz
+tar -xzf wifidog-portal-v2.0.3-full.tar.gz -C /opt/wifidog --strip-components=1
 ```
 
 确认目录结构：

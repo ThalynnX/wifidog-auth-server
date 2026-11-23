@@ -36,3 +36,8 @@ jobs:
               assert c.get('/admin/login').status_code == 200
           print('smoke ok')
           PY
+      - name: User/device control tests
+        env:
+          WIFIDOG_DB_URL: sqlite:////tmp/ci-user-control.db
+          WIFIDOG_RUN_MODE: test
+        run: python -m unittest tests.test_user_device_control -v

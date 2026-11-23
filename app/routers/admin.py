@@ -8,12 +8,12 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from .. import alipay, ratelimit, redis_bus as ws_bus, services_auth as svc, settings_store
+from .. import alipay, device_auth, ratelimit, redis_bus as ws_bus, services_auth as svc, settings_store
 from ..config import ADMIN_TOKEN_EXPIRE, DEVICE_OFFLINE_TIMEOUT, ONLINE_WINDOW_SECONDS
 from ..database import get_db
 from ..models import (
     Admin, AuthLog, Device, IpWhitelist, MacBlacklist, MacWhitelist, Order, Plan,
-    Session as Sess, Setting, Subscription, User,
+    Session as Sess, Setting, SmsCode, Subscription, User,
 )
 from ..security import hash_password, make_signed_token, parse_signed_token, verify_password
 from ..templates_env import templates
@@ -211,15 +211,225 @@ def users(request: Request, q: str = "", page: int = 1, size: int = 20, db: Sess
     out = []
     for u in rows:
         sub = sub_map.get(u.id)
+        quota = device_auth.quota_state(u)
         out.append({
             "id": u.id, "phone": u.phone, "username": u.username, "nickname": u.display_name,
             "status": u.status, "balance": u.balance,
             "plan": sub.plan_name if sub else "",
             "expire_at": sub.expire_at.strftime("%Y-%m-%d %H:%M") if sub and sub.expire_at else "",
             "online": svc.online_device_count(db, u.id),
+            "mac": u.mac or "",
+            "mac_masked": device_auth.mask_mac(u.mac or ""),
+            "device_limit": quota["limit"],
+            "device_used": quota["used"],
+            "device_remaining": quota["remaining"],
             "created_at": u.created_at.strftime("%Y-%m-%d %H:%M"),
         })
     return {"ok": True, "total": total, "rows": out}
+
+
+@router.get("/api/users/{uid}")
+def user_detail(uid: int, request: Request, db: Session = Depends(get_db)):
+    current_admin(request, db)
+    u = db.query(User).filter(User.id == uid).first()
+    if not u:
+        return {"ok": False, "msg": "用户不存在"}
+    sub = svc.get_active_subscription(db, u.id)
+    q = device_auth.quota_state(u)
+    cutoff = datetime.now() - timedelta(seconds=ONLINE_WINDOW_SECONDS)
+    sessions = (
+        db.query(Sess)
+        .filter(Sess.user_id == uid, Sess.status == 1, Sess.last_update_at >= cutoff)
+        .order_by(Sess.last_update_at.desc())
+        .all()
+    )
+    return {
+        "ok": True,
+        "user": {
+            "id": u.id,
+            "phone": u.phone or "",
+            "username": u.username or "",
+            "nickname": u.display_name,
+            "status": u.status,
+            "balance": u.balance,
+            "remark": u.remark or "",
+            "created_at": u.created_at.strftime("%Y-%m-%d %H:%M"),
+            "last_login_at": u.last_login_at.strftime("%Y-%m-%d %H:%M") if u.last_login_at else "",
+            "last_login_ip": u.last_login_ip or "",
+            "mac": u.mac or "",
+            "mac_masked": device_auth.mask_mac(u.mac or ""),
+            "mac_updated_at": u.mac_updated_at.strftime("%Y-%m-%d %H:%M") if u.mac_updated_at else "",
+            "device_limit": q["limit"],
+            "device_used": q["used"],
+            "device_remaining": q["remaining"],
+            "device_window_start": q["window_start"].strftime("%Y-%m-%d %H:%M") if q["window_start"] else "",
+            "device_window_end": q["window_end"].strftime("%Y-%m-%d %H:%M") if q["window_end"] else "",
+            "plan": sub.plan_name if sub else "",
+            "expire_at": sub.expire_at.strftime("%Y-%m-%d %H:%M") if sub and sub.expire_at else "",
+        },
+        "sessions": [{
+            "id": s.id,
+            "gw_id": s.gw_id,
+            "mac": s.mac,
+            "ip": s.ip,
+            "start_at": s.start_at.strftime("%Y-%m-%d %H:%M:%S") if s.start_at else "",
+            "last_update_at": s.last_update_at.strftime("%Y-%m-%d %H:%M:%S") if s.last_update_at else "",
+        } for s in sessions],
+    }
+
+
+class UserQuotaIn(BaseModel):
+    delta: int | None = None       # +1 / -1，按当前上限增减
+    limit: int | None = None       # 直接设置本周期上限
+    reset_used: bool = False       # 清零本周期已用次数，开启新周期
+
+
+@router.post("/api/users/{uid}/device-quota")
+def user_device_quota(uid: int, data: UserQuotaIn, request: Request, db: Session = Depends(get_db)):
+    current_admin(request, db)
+    u = db.query(User).filter(User.id == uid).first()
+    if not u:
+        return {"ok": False, "msg": "用户不存在"}
+    if data.limit is None and not data.delta and not data.reset_used:
+        return {"ok": False, "msg": "请提供增减次数、上限或重置操作"}
+    if data.limit is not None and data.delta is not None:
+        return {"ok": False, "msg": "上限和增减次数不能同时提交"}
+
+    old_limit = device_auth._change_limit(u)
+    if data.limit is not None:
+        if data.limit < 0 or data.limit > device_auth.MAX_DEVICE_CHANGE_LIMIT:
+            return {"ok": False, "msg": f"上限必须在 0-{device_auth.MAX_DEVICE_CHANGE_LIMIT} 之间"}
+        new_limit = data.limit
+    elif data.delta is not None:
+        if data.delta == 0:
+            return {"ok": False, "msg": "增减次数不能为 0"}
+        new_limit = old_limit + data.delta
+        if new_limit < 0 or new_limit > device_auth.MAX_DEVICE_CHANGE_LIMIT:
+            return {"ok": False, "msg": f"调整后上限必须在 0-{device_auth.MAX_DEVICE_CHANGE_LIMIT} 之间"}
+    else:
+        new_limit = old_limit
+
+    if data.reset_used:
+        u.mac_change_count = 0
+        u.device_change_window_start = datetime.now()
+    u.device_change_limit = new_limit
+    db.commit()
+    q = device_auth.quota_state(u)
+    return {
+        "ok": True,
+        "msg": "换绑额度已更新",
+        "device_limit": q["limit"],
+        "device_used": q["used"],
+        "device_remaining": q["remaining"],
+    }
+
+
+class UserDeviceIn(BaseModel):
+    mac: str = ""       # 空字符串表示解绑当前设备
+    kick: bool = True   # 解绑/改绑时是否立即踢掉旧会话
+
+
+@router.post("/api/users/{uid}/device")
+async def user_device_bind(uid: int, data: UserDeviceIn, request: Request, db: Session = Depends(get_db)):
+    current_admin(request, db)
+    u = db.query(User).filter(User.id == uid).first()
+    if not u:
+        return {"ok": False, "msg": "用户不存在"}
+    mac = (data.mac or "").strip().lower().replace("-", ":")
+    if mac and not _MAC_RE.match(mac):
+        return {"ok": False, "msg": "MAC 格式错误，应为 00:11:22:33:44:55"}
+
+    active = db.query(Sess).filter(Sess.user_id == uid, Sess.status == 1).all()
+    targets = [(s.mac, s.ip, s.gw_id) for s in active if s.mac]
+    now = datetime.now()
+    if data.kick:
+        for s in active:
+            s.status = 0
+            s.stop_at = now
+            s.revoked = True
+        db.commit()
+
+    old_mac = u.mac or ""
+    u.mac = mac
+    u.mac_updated_at = now if mac else None
+    db.commit()
+
+    if data.kick:
+        for m, ip, gw in targets:
+            try:
+                await wd.push_client_deny(m, ip, gw)
+            except Exception:  # noqa: BLE001
+                pass
+        if old_mac and not targets:
+            try:
+                await wd.push_client_deny(old_mac, "", "")
+            except Exception:  # noqa: BLE001
+                pass
+
+    q = device_auth.quota_state(u)
+    return {
+        "ok": True,
+        "msg": "已解绑当前设备" if not mac else "已绑定新设备",
+        "mac": u.mac or "",
+        "mac_masked": device_auth.mask_mac(u.mac or ""),
+        "device_limit": q["limit"],
+        "device_used": q["used"],
+        "device_remaining": q["remaining"],
+        "kicked": len(active) if data.kick else 0,
+    }
+
+
+class UserDeleteIn(BaseModel):
+    confirm: str = ""
+    force: bool = False
+
+
+@router.post("/api/users/{uid}/delete")
+async def user_delete(uid: int, data: UserDeleteIn, request: Request, db: Session = Depends(get_db)):
+    """删除用户账号：停会话、解绑设备、清订阅/验证码，保留订单做财务审计。"""
+    current_admin(request, db)
+    u = db.query(User).filter(User.id == uid).first()
+    if not u:
+        return {"ok": False, "msg": "用户不存在"}
+
+    expected = u.phone or u.username or str(u.id)
+    if (data.confirm or "").strip() != expected:
+        return {"ok": False, "msg": "确认信息不匹配，请输入该用户的手机号/用户名/ID"}
+
+    sub = svc.get_active_subscription(db, uid)
+    if sub and not data.force:
+        return {
+            "ok": False,
+            "msg": f"该用户还有生效套餐「{sub.plan_name}」，如确认删除请勾选强制删除",
+            "need_force": True,
+        }
+
+    active = db.query(Sess).filter(Sess.user_id == uid).all()
+    targets = [(s.mac, s.ip, s.gw_id) for s in active if s.mac and s.status == 1]
+
+    order_count = db.query(func.count(Order.id)).filter(Order.user_id == uid).scalar() or 0
+    sub_count = db.query(func.count(Subscription.id)).filter(Subscription.user_id == uid).scalar() or 0
+    sms_count = db.query(func.count(SmsCode.id)).filter(SmsCode.phone == u.phone).scalar() if u.phone else 0
+    db.query(Subscription).filter(Subscription.user_id == uid).delete(synchronize_session=False)
+    db.query(Sess).filter(Sess.user_id == uid).delete(synchronize_session=False)
+    if u.phone:
+        db.query(SmsCode).filter(SmsCode.phone == u.phone).delete(synchronize_session=False)
+    db.delete(u)
+    db.commit()
+    for m, ip, gw in targets:
+        try:
+            await wd.push_client_deny(m, ip, gw)
+        except Exception:  # noqa: BLE001
+            pass
+
+    return {
+        "ok": True,
+        "msg": f"用户已删除；保留 {order_count} 笔历史订单用于审计",
+        "deleted_subscriptions": sub_count,
+        "deleted_sessions": len(active),
+        "deleted_sms_codes": sms_count or 0,
+        "kept_orders": order_count,
+    }
 
 
 @router.post("/api/users/{uid}/toggle")

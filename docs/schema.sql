@@ -14,7 +14,7 @@ CREATE TABLE users (
 	last_login_at DATETIME, 
 	last_login_ip VARCHAR(64), 
 	remark VARCHAR(255), 
-	created_at DATETIME NOT NULL, mac VARCHAR(32) DEFAULT '', mac_updated_at DATETIME, mac_change_count INTEGER DEFAULT 0, alipay_user_id VARCHAR(64), alipay_nickname VARCHAR(128) DEFAULT '', alipay_avatar VARCHAR(255) DEFAULT '', alipay_bound_at DATETIME, 
+	created_at DATETIME NOT NULL, mac VARCHAR(32) DEFAULT '', mac_updated_at DATETIME, mac_change_count INTEGER DEFAULT 0, device_change_limit INTEGER DEFAULT 3 NOT NULL, device_change_window_start DATETIME, alipay_user_id VARCHAR(64), alipay_nickname VARCHAR(128) DEFAULT '', alipay_avatar VARCHAR(255) DEFAULT '', alipay_bound_at DATETIME,
 	PRIMARY KEY (id)
 );
 CREATE UNIQUE INDEX ix_users_username ON users (username);

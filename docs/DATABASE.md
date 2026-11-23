@@ -41,7 +41,7 @@ sqlite3 data/wifidog.db < docs/schema.sql
 
 | 表 | 用途 | 关键字段 |
 |---|---|---|
-| `users` | 用户、手机号/账号登录、支付宝绑定、设备 MAC | `phone`、`username`、`password_hash`、`alipay_user_id`、`mac`、`balance` |
+| `users` | 用户、手机号/账号登录、支付宝绑定、设备 MAC、换绑额度 | `phone`、`username`、`password_hash`、`alipay_user_id`、`mac`、`balance`、`device_change_limit` |
 | `devices` | 网关/路由器设备 | `gw_id`、`secret`、`online`、`last_seen_at`、`last_ip` |
 | `plans` | 套餐定义 | `price`（分）、`duration_minutes`、`traffic_mb`、`valid_days`、`device_limit` |
 | `orders` | 支付订单 | `order_no`、`plan_id`、`amount`、`status`、`trade_no`、`refund_no` |
