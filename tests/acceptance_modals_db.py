@@ -301,7 +301,9 @@ def main():
         # Rebind sub-window: Back does not change MAC; confirm updates DB and session.
         rebind_mac = "02:00:44:" + ":".join(suffix[-6:][i:i+2] for i in range(0, 6, 2))
         portal.goto(BASE + "/wifidog/login?gw_id=" + gw + "&mac=" + rebind_mac + "&ip=198.51.100.82")
-        portal.fill("#phone", phone2); portal.click("#sendBtn"); portal.wait_for_function("document.querySelector('#code').value.length >= 4")
+        with portal.expect_response("**/portal/api/send_code") as first_code:
+            portal.fill("#phone", phone2); portal.click("#sendBtn")
+        portal.fill("#code", (first_code.value.json().get("dev_code") or ""))
         sms_id = row("SELECT * FROM sms_codes WHERE phone=? ORDER BY id DESC LIMIT 1", (phone2,))["id"]
         portal.click("#smsLoginBtn"); visible(portal, "#rebindArea")
         check("换绑弹窗出现时数据库仍绑定原 MAC", row("SELECT * FROM users WHERE phone=?", (phone2,))["mac"] == mac2)
@@ -309,7 +311,7 @@ def main():
         with portal.expect_response("**/portal/api/send_code") as second_code:
             portal.click("#sendBtn")
         expected_code = second_code.value.json().get("dev_code", "")
-        portal.wait_for_function("code => document.querySelector('#code').value === code", arg=expected_code)
+        portal.fill("#code", expected_code)
         portal.click("#smsLoginBtn"); visible(portal, "#rebindArea"); portal.click("#rebindBtn")
         db_check("确认换绑立即更新用户 MAC", "SELECT * FROM users WHERE phone=?", (phone2,), lambda r: r["mac"] == rebind_mac and r["mac_change_count"] >= 1)
         db_check("确认换绑立即创建新 MAC 会话", "SELECT * FROM sessions WHERE mac=? ORDER BY id DESC LIMIT 1", (rebind_mac,), lambda r: bool(r["token"]))

@@ -25,7 +25,7 @@ from ..config import GATEWAY_PROTO, GWSTATS_KEY, WS_ALLOW_IPS, WS_REQUIRE_SECRET
 from ..database import get_db
 from ..models import Device, Plan, Session as Sess, User
 from ..security import new_token
-from ..settings_store import get_run_mode, get_site_name, get_site_notice
+from ..settings_store import get_run_mode, get_site_name, get_site_notice, sms_provider
 from ..templates_env import templates
 
 router = APIRouter(prefix="/wifidog", tags=["wifidog"])
@@ -99,6 +99,7 @@ def login_page(
 
     plans = db.query(Plan).filter(Plan.status == 1).order_by(Plan.sort.desc(), Plan.id.asc()).all()
     dev = db.query(Device).filter(Device.gw_id == gw_id).first() if _valid_gw_id(gw_id) else None
+    sms_mode = sms_provider(db)
     return templates.TemplateResponse(
         request=request,
         name="portal/login.html",
@@ -117,6 +118,8 @@ def login_page(
             "change_token": "",
             "bound_mac": "",
             "cur_mac": mac,
+            "sms_available": bool(sms_mode),
+            "sms_test_mode": sms_mode == "mock",
             "alipay_ready": alipay.oauth_ready(),
             "alipay_pay_ready": alipay.pay_ready(),
         },

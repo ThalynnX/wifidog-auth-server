@@ -464,6 +464,7 @@ ClientTimeout 10
 | `WIFIDOG_SMS_SECRET_KEY` | — | 短信 SecretKey |
 | `WIFIDOG_SMS_SIGN_NAME` | — | 短信签名 |
 | `WIFIDOG_SMS_TEMPLATE_CODE` | — | 模板 CODE |
+| `WIFIDOG_SMS_DEV_ECHO` | `0` | 仅隔离测试可设 `1`；生产必须为 0，验证码不回显 |
 | `WIFIDOG_SMS_CODE_EXPIRE` | `300` | 验证码有效期（秒） |
 | `WIFIDOG_SMS_DAILY_LIMIT` | `20` | 单号每日上限 |
 | `WIFIDOG_SMS_IP_HOURLY_LIMIT` | `10` | 单 IP 每小时上限 |

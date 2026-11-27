@@ -35,6 +35,18 @@ def confirm(page):
     page.locator(".modal-layer [data-ok]").last.click()
 
 
+def send_code_and_fill(page, phone):
+    """发送验证码并手动填入测试码；页面不再自动回显/自动填入。"""
+    page.fill("#phone", phone)
+    with page.expect_response("**/portal/api/send_code") as response_info:
+        page.click("#sendBtn")
+    payload = response_info.value.json()
+    code = payload.get("dev_code") or ""
+    check("测试环境短信接口返回测试码", bool(code), payload)
+    page.fill("#code", code)
+    return code
+
+
 def main():
     suffix = str(int(time.time()))[-8:]
     phone = "138" + suffix
@@ -58,9 +70,8 @@ def main():
         check("门户登录页无脚本错误并显示认证表单")
         page.screenshot(path=str(OUT / "portal-login-390.png"), full_page=True)
         page.click("#sendBtn"); check("空手机号发码有明确校验", "手机号" in page.locator("#smsMsg").inner_text())
-        page.fill("#phone", phone); page.click("#sendBtn")
-        page.wait_for_function("document.querySelector('#code').value.length >= 4")
-        check("发送验证码按钮返回并自动填入测试码", page.locator("#sendBtn").inner_text().find("秒") >= 0)
+        page.fill("#phone", phone); send_code_and_fill(page, phone)
+        check("发送验证码按钮返回并进入倒计时", page.locator("#sendBtn").inner_text().find("秒") >= 0)
         page.click("#smsLoginBtn"); page.wait_for_url("**/portal/plans**")
         visible(page, "#planList [data-plan-id]:first-child")
         check("无套餐登录后进入套餐页", page.locator("#phone").input_value() == phone)
@@ -119,15 +130,15 @@ def main():
         # Device rebind: mismatch -> back -> verify again -> confirm rebind.
         rebind_mac = "02:00:11:" + ":".join(suffix[-6:][i:i+2] for i in range(0, 6, 2))
         page.goto(BASE + "/wifidog/login?gw_id=" + gw + "&mac=" + rebind_mac + "&ip=198.51.100.67")
-        page.fill("#phone", phone); page.click("#sendBtn")
-        page.wait_for_function("document.querySelector('#code').value.length >= 4")
+        send_code_and_fill(page, phone)
         page.click("#smsLoginBtn"); visible(page, "#rebindArea")
         check("换设备登录展示换绑确认", page.locator("#newMac").input_value() == rebind_mac)
         page.click("#rebindBack"); check("换绑返回按钮恢复认证表单", page.locator("#authArea").is_visible())
         with page.expect_response("**/portal/api/send_code") as response_info:
             page.click("#sendBtn")
-        check("换绑后重新获取验证码", response_info.value.json().get("ok") is True)
-        page.wait_for_function("document.querySelector('#code').value.length >= 4")
+        payload = response_info.value.json()
+        check("换绑后重新获取验证码", payload.get("ok") is True)
+        page.fill("#code", payload.get("dev_code") or "")
         page.click("#smsLoginBtn"); visible(page, "#rebindArea")
         page.click("#rebindBtn"); page.wait_for_url("**/portal/success**")
         check("确认换绑后签发新会话", bool(page.evaluate("localStorage.getItem('wg_token') || ''")))

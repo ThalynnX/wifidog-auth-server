@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from .. import alipay, netutil, payment, ratelimit, realtime, services_auth as svc, sms, settings_store
 from ..config import (
     ALIPAY_APPID, ALIPAY_RETURN_URL, ALIPAY_SELLER_ID, COOKIE_SECURE,
-    SMS_CODE_EXPIRE, SMS_DAILY_LIMIT, SMS_IP_HOURLY_LIMIT,
+    SMS_CODE_EXPIRE, SMS_DAILY_LIMIT, SMS_DEV_ECHO, SMS_IP_HOURLY_LIMIT,
 )
 from ..database import get_db
 from ..models import Order, PaymentEvent, Plan, SmsCode, Session as Sess, User
@@ -139,11 +139,14 @@ def send_code(data: SendCodeIn, request: Request, db: Session = Depends(get_db))
     if not ok:
         return JSONResponse({"ok": False, "msg": "验证码发送失败，请稍后重试"})
 
-    # 测试模式回显验证码便于联调；正式模式（真实短信通道）一律为空
+    # 默认绝不回显验证码；仅隔离测试环境显式开启 WIFIDOG_SMS_DEV_ECHO=1 时返回，
+    # 前端也不会自动填入。生产环境 provider 为空时在上方直接 fail-closed。
+    dev_code = code if provider == "mock" and SMS_DEV_ECHO else ""
+    msg = "验证码已发送" if provider != "mock" else "验证码已生成（测试模式）"
     return JSONResponse({
         "ok": True,
-        "msg": "验证码已发送",
-        "dev_code": code if provider == "mock" else "",
+        "msg": msg,
+        "dev_code": dev_code,
     })
 
 

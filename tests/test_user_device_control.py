@@ -28,7 +28,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.main import app  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
 from app.models import Order, Plan, Session as Sess, SmsCode, Subscription, User  # noqa: E402
-from app import device_auth  # noqa: E402
+from app import device_auth, settings_store  # noqa: E402
 
 
 class UserDeviceControlTest(unittest.TestCase):
@@ -187,6 +187,31 @@ class UserDeviceControlTest(unittest.TestCase):
             self.assertIsNone(db.query(SmsCode).filter(SmsCode.phone == "13900001111").first())
             self.assertEqual(db.query(Order).filter(Order.user_id == self.uid).count(), 1)
         finally:
+            db.close()
+
+
+    def test_no_sms_channel_hides_sms_and_never_echoes_code(self) -> None:
+        db = SessionLocal()
+        old = settings_store.get_run_mode(db)
+        try:
+            settings_store.set_setting(db, "run_mode", "production")
+            db.commit()
+            html = self.client.get("/wifidog/login").text
+            self.assertIn("当前未配置短信通道", html)
+            self.assertIn('class="tabs hide"', html)
+            self.assertIn('<form id="pwdForm" novalidate>', html)
+            r = self.client.post("/portal/api/send_code", json={"phone": "13900001111"})
+            self.assertFalse(r.json()["ok"])
+            self.assertIn("未配置", r.json()["msg"])
+
+            settings_store.set_setting(db, "run_mode", "test")
+            db.commit()
+            r = self.client.post("/portal/api/send_code", json={"phone": "13900001111"})
+            self.assertTrue(r.json()["ok"], r.text)
+            self.assertEqual(r.json()["dev_code"], "")
+        finally:
+            settings_store.set_setting(db, "run_mode", old)
+            db.commit()
             db.close()
 
 

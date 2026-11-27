@@ -1,8 +1,8 @@
 """短信发送：mock / http webhook / aliyun。
 
 provider 由调用方按运行模式决定（settings_store.sms_provider）：
-  test 模式      -> mock（验证码写入日志并回显，便于联调）
-  production 模式 -> 配置的真实通道；未配置就绪时也回退 mock 并告警
+  test 模式      -> mock（验证码只写服务端日志，默认不回显）
+  production 模式 -> 配置的真实通道；未配置就绪时直接拒绝，不退回 mock
 """
 import base64
 import hashlib
@@ -88,7 +88,7 @@ def send_code(phone: str, code: str, provider: str = "mock") -> bool:
         return _send_aliyun(phone, code)
     if provider == "http":
         return _send_http(phone, code)
-    # mock：测试模式使用，验证码写入日志并在接口回显
+    # mock：仅隔离测试使用，验证码只写服务端日志，默认不在接口回显
     logger.info("[MOCK SMS] phone=%s code=%s (expires in %ss)", phone, code, SMS_CODE_EXPIRE)
     return True
 
