@@ -190,25 +190,27 @@ class UserDeviceControlTest(unittest.TestCase):
             db.close()
 
 
-    def test_no_sms_channel_hides_sms_and_never_echoes_code(self) -> None:
+    def test_no_sms_channel_uses_local_display_code(self) -> None:
         db = SessionLocal()
         old = settings_store.get_run_mode(db)
         try:
             settings_store.set_setting(db, "run_mode", "production")
             db.commit()
             html = self.client.get("/wifidog/login").text
-            self.assertIn("当前未配置短信通道", html)
-            self.assertIn('class="tabs hide"', html)
-            self.assertIn('<form id="pwdForm" novalidate>', html)
+            self.assertIn("点击“获取验证码”后会直接在页面显示验证码", html)
+            self.assertIn('id="smsTab"', html)
+            self.assertIn('<form id="smsForm" novalidate>', html)
+            self.assertIn('<form id="pwdForm" class="hide" novalidate>', html)
             r = self.client.post("/portal/api/send_code", json={"phone": "13900001111"})
-            self.assertFalse(r.json()["ok"])
-            self.assertIn("未配置", r.json()["msg"])
+            self.assertTrue(r.json()["ok"], r.text)
+            self.assertRegex(r.json().get("dev_code", ""), r"^\d{4}$")
+            self.assertIn("本地", r.json()["msg"])
 
             settings_store.set_setting(db, "run_mode", "test")
             db.commit()
             r = self.client.post("/portal/api/send_code", json={"phone": "13900001111"})
             self.assertTrue(r.json()["ok"], r.text)
-            self.assertEqual(r.json()["dev_code"], "")
+            self.assertRegex(r.json().get("dev_code", ""), r"^\d{4}$")
         finally:
             settings_store.set_setting(db, "run_mode", old)
             db.commit()

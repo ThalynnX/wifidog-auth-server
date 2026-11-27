@@ -10,7 +10,6 @@ rm -f /tmp/wifidog-ui-acceptance.db
 PYTHONPATH="$PWD" \
 WIFIDOG_DB_URL=sqlite:////tmp/wifidog-ui-acceptance.db \
 WIFIDOG_SECRET=ui-acceptance-secret-2026 \
-WIFIDOG_SMS_DEV_ECHO=1 \
 uvicorn app.main:app --host 127.0.0.1 --port 8011
 ```
 

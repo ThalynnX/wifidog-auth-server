@@ -36,7 +36,7 @@ def confirm(page):
 
 
 def send_code_and_fill(page, phone):
-    """发送验证码并手动填入测试码；页面不再自动回显/自动填入。"""
+    """发送验证码并填入接口返回的测试码（页面同时会明文显示）。"""
     page.fill("#phone", phone)
     with page.expect_response("**/portal/api/send_code") as response_info:
         page.click("#sendBtn")

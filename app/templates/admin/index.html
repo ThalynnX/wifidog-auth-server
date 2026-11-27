@@ -600,7 +600,7 @@ $('logRefresh').onclick = () => loadLogs(state.logsPage);
 
 function renderChannelStatus(s, c) {
   $('channels').innerHTML = [
-    ['短信通道', c.sms_provider || '-', c.sms_ready, c.sms_ready ? '参数已配置' : (s.run_mode === 'test' ? '测试模式 · 验证码仅写日志' : '未配置 / 验证码登录已关闭')],
+    ['短信通道', c.sms_provider || '-', c.sms_ready, c.sms_ready ? '参数已配置' : '未配置 / 验证码在页面本地显示'],
     ['支付通道', c.pay_provider || '-', c.pay_ready, c.pay_ready ? '参数已配置' : '未配置 / 正式模式不可收款'],
     ['当前模式', s.run_mode === 'production' ? 'PRODUCTION' : 'TEST', true, s.run_mode === 'production' ? '真实通道' : '模拟通道']
   ].map(ch => '<div class="channel"><div><strong>' + ch[0] + '</strong><div class="muted" style="font-size:11px">' + UI.esc(ch[1]) + ' · ' + ch[3] + '</div></div><span class="tag ' + (ch[2] ? '' : 'off') + '">' + (ch[2] ? '就绪' : '待配置') + '</span></div>').join('');

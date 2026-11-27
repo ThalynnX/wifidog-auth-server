@@ -100,6 +100,7 @@ def login_page(
     plans = db.query(Plan).filter(Plan.status == 1).order_by(Plan.sort.desc(), Plan.id.asc()).all()
     dev = db.query(Device).filter(Device.gw_id == gw_id).first() if _valid_gw_id(gw_id) else None
     sms_mode = sms_provider(db)
+    sms_local_display = not sms_mode
     return templates.TemplateResponse(
         request=request,
         name="portal/login.html",
@@ -118,7 +119,8 @@ def login_page(
             "change_token": "",
             "bound_mac": "",
             "cur_mac": mac,
-            "sms_available": bool(sms_mode),
+            "sms_available": True,
+            "sms_local_display": sms_local_display,
             "sms_test_mode": sms_mode == "mock",
             "alipay_ready": alipay.oauth_ready(),
             "alipay_pay_ready": alipay.pay_ready(),

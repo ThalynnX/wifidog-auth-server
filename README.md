@@ -268,6 +268,8 @@ passlib  bcrypt  PyJWT  requests  cryptography>=42
 ## 6. 快速开始（测试模式，10 分钟跑通）
 
 > 测试模式下：短信验证码直接在接口返回 `dev_code`，支付走本站模拟页，**不需要任何第三方密钥**。
+>
+> 生产模式未配置真实短信通道时：验证码不会发送短信，仍会在门户页面直接显示，保证登录可用；配置真实通道后自动改为正常短信发送，不再页面显示。
 
 ```bash
 # 1) 拉取源码
@@ -464,7 +466,6 @@ ClientTimeout 10
 | `WIFIDOG_SMS_SECRET_KEY` | — | 短信 SecretKey |
 | `WIFIDOG_SMS_SIGN_NAME` | — | 短信签名 |
 | `WIFIDOG_SMS_TEMPLATE_CODE` | — | 模板 CODE |
-| `WIFIDOG_SMS_DEV_ECHO` | `0` | 仅隔离测试可设 `1`；生产必须为 0，验证码不回显 |
 | `WIFIDOG_SMS_CODE_EXPIRE` | `300` | 验证码有效期（秒） |
 | `WIFIDOG_SMS_DAILY_LIMIT` | `20` | 单号每日上限 |
 | `WIFIDOG_SMS_IP_HOURLY_LIMIT` | `10` | 单 IP 每小时上限 |

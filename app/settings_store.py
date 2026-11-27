@@ -74,10 +74,14 @@ def get_site_name(db) -> str:
 
 
 def sms_provider(db) -> str:
-    """短信通道由运行模式决定：test 一律 mock；production 用配置的真实通道。"""
+    """短信通道由运行模式决定：test 一律 mock；production 用配置的真实通道。
+
+    生产未配置真实通道时返回空字符串，门户会进入 local 模式：
+    不发送真实短信，验证码直接在页面明文显示，保证登录可用。
+    """
     if is_test_mode(db):
         return "mock"
-    # 生产模式未配置真实通道时 fail-closed，绝不能退回 mock 自动显示验证码。
+    # 注意：空字符串不是拒绝，而是“本地显示”模式，由 /portal/api/send_code 处理。
     return config.SMS_PROVIDER if config.sms_ready() else ""
 
 

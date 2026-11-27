@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from .. import alipay, netutil, payment, ratelimit, realtime, services_auth as svc, sms, settings_store
 from ..config import (
     ALIPAY_APPID, ALIPAY_RETURN_URL, ALIPAY_SELLER_ID, COOKIE_SECURE,
-    SMS_CODE_EXPIRE, SMS_DAILY_LIMIT, SMS_DEV_ECHO, SMS_IP_HOURLY_LIMIT,
+    SMS_CODE_EXPIRE, SMS_DAILY_LIMIT, SMS_IP_HOURLY_LIMIT,
 )
 from ..database import get_db
 from ..models import Order, PaymentEvent, Plan, SmsCode, Session as Sess, User
@@ -127,8 +127,11 @@ def send_code(data: SendCodeIn, request: Request, db: Session = Depends(get_db))
         return JSONResponse({"ok": False, "msg": "今日验证码发送已达上限"})
 
     provider = settings_store.sms_provider(db)
-    if not provider:
-        return JSONResponse({"ok": False, "msg": "短信通道未配置，请联系管理员"})
+    # 未配置真实短信通道时进入“本地显示”模式：验证码仍然生成并落库，
+    # 但不调用任何短信服务商，直接在页面显示验证码供登录使用。
+    local_display = not provider
+    if local_display:
+        provider = "local"
 
     code = sms.generate_code()
     db.add(SmsCode(phone=phone, code=code, purpose="login", ip=ip,
@@ -139,10 +142,12 @@ def send_code(data: SendCodeIn, request: Request, db: Session = Depends(get_db))
     if not ok:
         return JSONResponse({"ok": False, "msg": "验证码发送失败，请稍后重试"})
 
-    # 默认绝不回显验证码；仅隔离测试环境显式开启 WIFIDOG_SMS_DEV_ECHO=1 时返回，
-    # 前端也不会自动填入。生产环境 provider 为空时在上方直接 fail-closed。
-    dev_code = code if provider == "mock" and SMS_DEV_ECHO else ""
-    msg = "验证码已发送" if provider != "mock" else "验证码已生成（测试模式）"
+    # 本地显示 / 测试模式返回验证码供页面明文展示；真实短信通道不回显。
+    dev_code = code if provider in ("mock", "local") else ""
+    msg = {
+        "local": "验证码已生成，未配置短信通道，已在页面本地显示",
+        "mock": "验证码已生成（测试模式）",
+    }.get(provider, "验证码已发送")
     return JSONResponse({
         "ok": True,
         "msg": msg,

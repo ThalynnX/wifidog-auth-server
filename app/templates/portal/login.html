@@ -27,23 +27,23 @@
     </div>
 
     {% if site_notice %}<div class="notice">{{ site_notice }}</div>{% endif %}
-    {% if not sms_available %}<div class="notice warn">当前未配置短信通道，请使用账号密码登录。</div>{% endif %}
+    {% if sms_local_display %}<div class="notice warn">未配置短信通道：点击“获取验证码”后会直接在页面显示验证码。</div>{% endif %}
     <div class="notice hide" id="autoStatus" role="status"></div>
 
     <div id="authArea">
-      <div class="tabs{% if not sms_available %} hide{% endif %}" role="tablist">
+      <div class="tabs" role="tablist">
         <button class="tab-btn active" id="smsTab" type="button" role="tab" aria-selected="true">手机验证</button>
         <button class="tab-btn" id="pwdTab" type="button" role="tab" aria-selected="false">账号密码</button>
       </div>
 
-      <form id="smsForm" novalidate{% if not sms_available %} class="hide"{% endif %}>
+      <form id="smsForm" novalidate>
         <div class="field"><label for="phone">手机号码</label><input class="input" id="phone" type="tel" inputmode="numeric" placeholder="请输入 11 位手机号" maxlength="11" autocomplete="tel"></div>
         <div class="field"><label for="code">短信验证码</label><div class="input-row"><input class="input" id="code" inputmode="numeric" placeholder="短信验证码" maxlength="6" autocomplete="off"><button class="btn secondary" id="sendBtn" type="button">获取验证码</button></div></div>
         <button class="btn block" id="smsLoginBtn" type="submit">验证并连接网络</button>
         <div class="form-msg" id="smsMsg" role="status" aria-live="polite"></div>
       </form>
 
-      <form id="pwdForm" novalidate{% if sms_available %} class="hide"{% endif %}>
+      <form id="pwdForm" class="hide" novalidate>
         <div class="field"><label for="username">账号</label><input class="input" id="username" placeholder="请输入账号" maxlength="64" autocomplete="username"></div>
         <div class="field"><label for="password">密码</label><input class="input" id="password" type="password" placeholder="请输入密码" maxlength="128" autocomplete="current-password"></div>
         <button class="btn block" id="pwdLoginBtn" type="submit">登录并连接网络</button>
@@ -140,8 +140,12 @@
     UI.busy(this,true,'发送中…'); say('smsMsg','正在请求验证码…','info');
     const r=await UI.post('/portal/api/send_code',{phone}); UI.busy(this,false);
     if(!r.ok){say('smsMsg',r.msg||'验证码发送失败');return;}
-    // 验证码绝不自动填入；正式通道提示查收，测试模式提示已生成。
-    say('smsMsg',r.msg||'验证码已发送，请注意查收','ok');
+    if(r.dev_code){
+      $('code').value=r.dev_code;
+      say('smsMsg','验证码：'+r.dev_code+'（未配置短信通道，已直接显示）','ok');
+    }else{
+      say('smsMsg',r.msg||'验证码已发送，请注意查收','ok');
+    }
     startCountdown(60); $('code').focus();
   };
   $('phone').oninput=function(){this.value=this.value.replace(/\D/g,'').slice(0,11);};

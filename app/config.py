@@ -1,7 +1,7 @@
 """全局配置：环境变量 > .env 文件；短信/支付密钥均为占位符，正式接入时替换。
 
 运行模式（开关）说明：
-  run_mode = test       测试模式：短信走 mock（验证码仅写日志，不回显）、支付走 mock、ping 自动登记设备
+  run_mode = test       测试模式：短信走 mock（验证码在页面本地显示）、支付走 mock、ping 自动登记设备
   run_mode = production 正式模式：短信/支付走配置的真实通道，mock 支付确认关闭
 优先级：后台"系统设置"中的 run_mode > 环境变量 WIFIDOG_RUN_MODE > 默认 test
 """
@@ -86,8 +86,6 @@ SMS_ACCESS_KEY = os.getenv("WIFIDOG_SMS_ACCESS_KEY", "<your-sms-access-key>")   
 SMS_SECRET_KEY = os.getenv("WIFIDOG_SMS_SECRET_KEY", "<your-sms-secret-key>")     # 占位符
 SMS_SIGN_NAME = os.getenv("WIFIDOG_SMS_SIGN_NAME", "<your-sms-sign-name>")        # 占位符
 SMS_TEMPLATE_CODE = os.getenv("WIFIDOG_SMS_TEMPLATE_CODE", "<your-template-code>")  # 占位符
-# 仅供隔离测试：mock 模式下是否在接口回显验证码。默认关闭，生产环境禁止开启。
-SMS_DEV_ECHO = os.getenv("WIFIDOG_SMS_DEV_ECHO", "0").strip() == "1"
 SMS_CODE_EXPIRE = int(os.getenv("WIFIDOG_SMS_CODE_EXPIRE", "300"))
 SMS_DAILY_LIMIT = int(os.getenv("WIFIDOG_SMS_DAILY_LIMIT", "20"))
 # 同一 IP 每小时最多发送条数（防换号刷短信）
