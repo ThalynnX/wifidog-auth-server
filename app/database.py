@@ -63,6 +63,7 @@ def _migrate():
         },
         "devices": {
             "secret": "VARCHAR(128) DEFAULT ''",
+            "device_id": "VARCHAR(128) DEFAULT ''",
         },
         "sessions": {
             "down_mbps": "FLOAT DEFAULT 0",

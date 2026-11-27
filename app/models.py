@@ -63,6 +63,7 @@ class Device(Base, TimestampMixin):
     name = Column(String(128), default="")        # 设备名称/热点名
     location = Column(String(255), default="")    # 安装位置(门店)
     secret = Column(String(128), default="")      # 网关共享密钥(可选校验)
+    device_id = Column(String(128), default="")   # 网关自报 device_id，首帧绑定后校验
 
     status = Column(Integer, default=1, nullable=False)   # 1启用 0禁用
     online = Column(Integer, default=0, nullable=False)   # 是否在线(由 ping 维护)

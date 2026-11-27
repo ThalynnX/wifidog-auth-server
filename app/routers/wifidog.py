@@ -880,11 +880,16 @@ def _ws_ip_allowed(ip: str) -> bool:
     return False
 
 
-async def _ws_authorize(websocket: WebSocket, gw_id: str) -> tuple[bool, str]:
+async def _ws_authorize(
+    websocket: WebSocket, gw_id: str, device_id: str = "",
+    enforce_device_id: bool = False,
+) -> tuple[bool, str]:
     """校验网关 WS：必须已登记且启用；可配共享 secret 与来源 IP 白名单。
 
     secret 通过 query `secret=` 或 header `x-gateway-secret` 传递。
     APFree 的 WS 地址由 ws_server->path 决定，可在 path 后追加 ?secret=...
+    `device_id` 来自 APFree 首帧（get_device_id），首次认证时绑定，
+    之后不一致直接拒绝，避免仅凭可猜的 gw_id 冒充网关。
     """
     from ..database import SessionLocal
     from ..models import Device
@@ -913,6 +918,26 @@ async def _ws_authorize(websocket: WebSocket, gw_id: str) -> tuple[bool, str]:
         elif WS_REQUIRE_SECRET:
             logger.warning("拒绝 WS 未配置 secret gw=%s（WS_REQUIRE_SECRET=1）", gw_id)
             return False, "网关未配置共享密钥"
+
+        reported = (device_id or "").strip()
+        if reported.upper() == "UNKNOWN":
+            reported = ""
+        bound = (getattr(dev, "device_id", "") or "").strip()
+        if enforce_device_id and not reported:
+            logger.warning("拒绝 WS 未上报 device_id gw=%s ip=%s", gw_id, ip)
+            return False, "网关未上报设备标识"
+        if bound:
+            if reported and not secrets.compare_digest(reported, bound):
+                logger.warning("拒绝 WS device_id 不匹配 gw=%s ip=%s", gw_id, ip)
+                return False, "网关设备标识不匹配"
+            if not reported:
+                logger.warning("拒绝 WS device_id 缺失 gw=%s ip=%s", gw_id, ip)
+                return False, "网关设备标识缺失"
+        elif reported:
+            # TOFU：首次连接绑定，后续只能由同一 device_id 使用该 gw_id。
+            dev.device_id = reported
+            db.commit()
+            logger.info("WS 首次绑定 device_id gw=%s device=%s", gw_id, reported)
         return True, ""
     finally:
         db.close()
