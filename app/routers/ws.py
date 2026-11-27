@@ -247,28 +247,63 @@ def _process_counters(db: Session, data: dict) -> tuple[dict, dict]:
 
 @router.websocket("/ws/wifidogx")
 async def wifidogx_ws(websocket: WebSocket):
+    """apfree 的 ws_server->path 通常只写 /ws/wifidogx，不带 gw_id 查询参数。
+
+    为兼容这种真实部署，握手后先读首帧取 gw_id，再做网关鉴权；鉴权通过前
+    不注册连接、不接收广播、不下发任何指令。
+    """
     gw_id = (websocket.query_params.get("gw_id")
              or websocket.query_params.get("device_id") or "").strip()
-    ok, why = await _ws_authorize(websocket, gw_id)
-    if not ok:
-        await websocket.close(code=1008, reason=why)
-        return
-    await websocket.accept()
-    db: Session = SessionLocal()
+    db: Session | None = None
+    first_raw: str | None = None
+    if gw_id:
+        ok, why = await _ws_authorize(websocket, gw_id)
+        if not ok:
+            await websocket.close(code=1008, reason=why)
+            return
+        await websocket.accept()
+    else:
+        await websocket.accept()
+        try:
+            first_raw = await asyncio.wait_for(websocket.receive_text(), timeout=8)
+        except asyncio.TimeoutError:
+            await websocket.close(code=1008, reason="未上报网关身份")
+            return
+        if not first_raw.strip():
+            await websocket.close(code=1008, reason="未上报网关身份")
+            return
+        try:
+            first_data = json.loads(first_raw)
+        except (json.JSONDecodeError, ValueError):
+            await websocket.close(code=1008, reason="首帧不是 JSON")
+            return
+        if not isinstance(first_data, dict):
+            await websocket.close(code=1008, reason="首帧格式错误")
+            return
+        gw_id = _client_gw_id(first_data)
+        ok, why = await _ws_authorize(websocket, gw_id)
+        if not ok:
+            await websocket.close(code=1008, reason=why)
+            return
+        logger.info("WS 首帧鉴权通过 gw_id=%s", gw_id)
+    db = SessionLocal()
     await _ws_register(websocket, gw_id)
     cid = _ws_conn_ids.get(websocket, "")
     logger.info("WS 连接建立 gw_id=%s conn=%s", gw_id or "-", cid)
     try:
         while True:
-            try:
-                raw = await asyncio.wait_for(
-                    websocket.receive_text(), timeout=HEARTBEAT_INTERVAL
-                )
-            except asyncio.TimeoutError:
-                if not await _safe_send(websocket, "Pong"):
-                    break
-                await ws_bus.heartbeat_conn(cid)
-                continue
+            if first_raw is not None:
+                raw, first_raw = first_raw, None
+            else:
+                try:
+                    raw = await asyncio.wait_for(
+                        websocket.receive_text(), timeout=HEARTBEAT_INTERVAL
+                    )
+                except asyncio.TimeoutError:
+                    if not await _safe_send(websocket, "Pong"):
+                        break
+                    await ws_bus.heartbeat_conn(cid)
+                    continue
 
             await ws_bus.heartbeat_conn(cid)
 
@@ -338,6 +373,7 @@ async def wifidogx_ws(websocket: WebSocket):
     finally:
         await _ws_unregister(websocket)
         try:
-            db.close()
+            if db is not None:
+                db.close()
         except Exception:  # noqa: BLE001
             pass
