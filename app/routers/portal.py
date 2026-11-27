@@ -164,7 +164,7 @@ async def login(data: LoginIn, request: Request, db: Session = Depends(get_db)):
         return JSONResponse({"ok": False, "msg": "验证码错误或已过期"})
 
     ratelimit.reset(f"login:ph:{phone}")
-    user = svc.get_or_create_user(db, phone, ip)
+    user = svc.get_or_create_user(db, phone, ip, mac=data.mac)
     # 设备(MAC)绑定：认证过的设备会被记住，换设备需要重新认证；会员可自助更换
     dev_ok, dev_code, dev_msg = device_auth.check_device(db, user, data.mac)
     if not dev_ok:
@@ -191,12 +191,13 @@ async def login(data: LoginIn, request: Request, db: Session = Depends(get_db)):
             sent = await push_client_allow(data.mac, data.ip, data.gw_id, token)
         except Exception:  # noqa: BLE001
             logger.exception("推送 allow 失败（白名单）")
+        if not sent:
+            return JSONResponse({"ok": False, "msg": "网关未响应，未完成放行，请重试或联系管理员", "need_retry": True})
         if sess:
-            if sent:
-                sess.status = 1
-                sess.stop_at = None
-                sess.last_update_at = datetime.now()
-                db.commit()
+            sess.status = 1
+            sess.stop_at = None
+            sess.last_update_at = datetime.now()
+            db.commit()
             svc.mark_authenticated(db, sess, "login", user_id=user.id, phone=phone,
                                   gw_id=data.gw_id, mac=data.mac, ip=ip, reason="mac_whitelisted")
         return JSONResponse({"ok": True, "redirect": "", "token": token, "whitelisted": True})
@@ -210,15 +211,20 @@ async def login(data: LoginIn, request: Request, db: Session = Depends(get_db)):
     sess = sess or db.query(Sess).filter(Sess.token == token).first()
     sent = 0
     try:
-        sent = await push_client_allow(data.mac, data.ip, data.gw_id, token)
+        sent = await push_client_allow(
+            data.mac, data.ip, data.gw_id, token,
+            down_kbps=(_sub.speed_limit_down if _sub else 0),
+            up_kbps=(_sub.speed_limit_up if _sub else 0),
+        )
     except Exception:  # noqa: BLE001
         logger.exception("推送 allow 失败")
+    if not sent:
+        return JSONResponse({"ok": False, "msg": "网关未响应，未完成放行，请重试或联系管理员", "need_retry": True})
     if sess:
-        if sent:
-            sess.status = 1
-            sess.stop_at = None
-            sess.last_update_at = datetime.now()
-            db.commit()
+        sess.status = 1
+        sess.stop_at = None
+        sess.last_update_at = datetime.now()
+        db.commit()
         svc.mark_authenticated(db, sess, "login", user_id=user.id, phone=phone,
                               gw_id=data.gw_id, mac=data.mac, ip=ip, reason="portal_login")
     # 云模式放行已由 WebSocket 下发完成，不再跳网关 /wifidog/auth
@@ -250,18 +256,24 @@ async def device_rebind(data: RebindIn, request: Request, db: Session = Depends(
 
     token = issue_token(db, user.id, data.gw_id, data.mac)
     ip = data.ip or _ip(request)
+    sub = svc.get_active_subscription(db, user.id)
     sent = 0
     try:
-        sent = await push_client_allow(data.mac, ip, data.gw_id, token)
+        sent = await push_client_allow(
+            data.mac, ip, data.gw_id, token,
+            down_kbps=(sub.speed_limit_down if sub else 0),
+            up_kbps=(sub.speed_limit_up if sub else 0),
+        )
     except Exception:  # noqa: BLE001
         logger.exception("推送 allow 失败（换设备）")
+    if not sent:
+        return JSONResponse({"ok": False, "msg": "网关未响应，未完成放行，请重试或联系管理员", "need_retry": True})
     sess = db.query(Sess).filter(Sess.token == token).first()
     if sess:
-        if sent:
-            sess.status = 1
-            sess.stop_at = None
-            sess.last_update_at = datetime.now()
-            db.commit()
+        sess.status = 1
+        sess.stop_at = None
+        sess.last_update_at = datetime.now()
+        db.commit()
         svc.mark_authenticated(db, sess, "device_rebind", user_id=user.id, phone=phone,
                               gw_id=data.gw_id, mac=data.mac, ip=ip, reason=msg)
     return JSONResponse({"ok": True, "msg": "已更换绑定设备，现在可以直接上网了", "token": token})
@@ -296,15 +308,20 @@ async def device_auto(data: AutoIn, request: Request, db: Session = Depends(get_
     sess = sess or db.query(Sess).filter(Sess.token == token).first()
     sent = 0
     try:
-        sent = await push_client_allow(mac, ip, data.gw_id, token)
+        sent = await push_client_allow(
+            mac, ip, data.gw_id, token,
+            down_kbps=(_sub.speed_limit_down if _sub else 0),
+            up_kbps=(_sub.speed_limit_up if _sub else 0),
+        )
     except Exception:  # noqa: BLE001
         logger.exception("推送 allow 失败（自动识别）")
+    if not sent:
+        return JSONResponse({"ok": False, "msg": "网关未响应，未完成放行，请重试或联系管理员", "need_retry": True})
     if sess:
-        if sent:
-            sess.status = 1
-            sess.stop_at = None
-            sess.last_update_at = datetime.now()
-            db.commit()
+        sess.status = 1
+        sess.stop_at = None
+        sess.last_update_at = datetime.now()
+        db.commit()
         svc.mark_authenticated(db, sess, "device_auto", user_id=user.id,
                               phone=user.phone or "", gw_id=data.gw_id, mac=mac, ip=ip,
                               reason="known_device")
@@ -322,22 +339,27 @@ async def password_login(data: PwdLoginIn, request: Request, db: Session = Depen
     user = db.query(User).filter(User.username == data.username).first()
     if not user or not user.password_hash or not verify_password(data.password, user.password_hash):
         return JSONResponse({"ok": False, "msg": "账号或密码错误"})
-    ok, reason, _ = svc.check_access(db, user, exclude_mac=(data.mac or ""))
+    ok, reason, sub = svc.check_access(db, user, exclude_mac=(data.mac or ""))
     if not ok:
         return JSONResponse({"ok": False, "msg": reason, "need_buy": True})
     token = issue_token(db, user.id, data.gw_id, data.mac)
     sent = 0
     try:
-        sent = await push_client_allow(data.mac, ip, data.gw_id, token)
+        sent = await push_client_allow(
+            data.mac, ip, data.gw_id, token,
+            down_kbps=(sub.speed_limit_down if sub else 0),
+            up_kbps=(sub.speed_limit_up if sub else 0),
+        )
     except Exception:  # noqa: BLE001
         logger.exception("推送 allow 失败（账号密码登录）")
+    if not sent:
+        return JSONResponse({"ok": False, "msg": "网关未响应，未完成放行，请重试或联系管理员", "need_retry": True})
     sess = db.query(Sess).filter(Sess.token == token).first()
     if sess:
-        if sent:
-            sess.status = 1
-            sess.stop_at = None
-            sess.last_update_at = datetime.now()
-            db.commit()
+        sess.status = 1
+        sess.stop_at = None
+        sess.last_update_at = datetime.now()
+        db.commit()
         svc.mark_authenticated(db, sess, "login", user_id=user.id, phone=user.phone or "",
                               gw_id=data.gw_id, mac=data.mac, ip=ip, reason="password_login")
     return JSONResponse({
@@ -351,7 +373,7 @@ async def password_login(data: PwdLoginIn, request: Request, db: Session = Depen
 @router.get("/api/plans")
 def api_plans(db: Session = Depends(get_db)):
     """门户套餐实时数据：后台改价/上下架后，套餐页无需整页刷新即可变化。"""
-    plans = db.query(Plan).filter(Plan.status == 1).order_by(Plan.sort.desc(), Plan.id.asc()).all()
+    plans = db.query(Plan).filter(Plan.status == 1, Plan.type != "free").order_by(Plan.sort.desc(), Plan.id.asc()).all()
     return {
         "ok": True,
         "rows": [{
@@ -362,6 +384,8 @@ def api_plans(db: Session = Depends(get_db)):
             "device_limit": p.device_limit or 0,
             "valid_days": p.valid_days or 0,
             "description": p.description or "",
+            "speed_limit_up_mbps": round((p.speed_limit_up or 0) / 1000, 2),
+            "speed_limit_down_mbps": round((p.speed_limit_down or 0) / 1000, 2),
             "price_text": f"{(p.price or 0) / 100:.2f}",
         } for p in plans],
     }
@@ -369,7 +393,7 @@ def api_plans(db: Session = Depends(get_db)):
 
 @router.get("/plans", response_class=HTMLResponse)
 def plans_page(request: Request, phone: str = "", token: str = "", db: Session = Depends(get_db)):
-    plans = db.query(Plan).filter(Plan.status == 1).order_by(Plan.sort.desc(), Plan.id.asc()).all()
+    plans = db.query(Plan).filter(Plan.status == 1, Plan.type != "free").order_by(Plan.sort.desc(), Plan.id.asc()).all()
     return templates.TemplateResponse(
         request=request,
         name="portal/plans.html",
@@ -388,7 +412,7 @@ def buy(data: BuyIn, request: Request, db: Session = Depends(get_db)):
     if not ratelimit.check(f"buy:ip:{ip}", BUY_IP_LIMIT[0], BUY_IP_LIMIT[1]):
         return JSONResponse({"ok": False, "msg": "请求过于频繁，请稍后再试"})
 
-    plan = db.query(Plan).filter(Plan.id == data.plan_id, Plan.status == 1).first()
+    plan = db.query(Plan).filter(Plan.id == data.plan_id, Plan.status == 1, Plan.type != "free").first()
     if not plan:
         return JSONResponse({"ok": False, "msg": "套餐不存在或已下架"})
 
@@ -406,7 +430,7 @@ def buy(data: BuyIn, request: Request, db: Session = Depends(get_db)):
             return JSONResponse({"ok": False, "msg": "请输入正确的手机号"})
         user = db.query(User).filter(User.phone == phone).first()
         if not user:
-            user = svc.get_or_create_user(db, phone, ip)
+            user = svc.get_or_create_user(db, phone, ip, grant_trial=False)
     elif phone:
         if _bad_phone(phone):
             return JSONResponse({"ok": False, "msg": "请输入正确的手机号"})
@@ -649,12 +673,28 @@ def api_live(token: str = "", mac: str = "", db: Session = Depends(get_db)):
     down_mbps = (st or {}).get("down_mbps", sess.down_mbps or 0)
     up_mbps = (st or {}).get("up_mbps", sess.up_mbps or 0)
 
+    remaining_seconds = None
+    expire_at_full = ""
+    reminder = ""
+    if sub is not None and sub.expire_at:
+        remaining_seconds = max(0, int((sub.expire_at - now).total_seconds()))
+        expire_at_full = sub.expire_at.strftime("%Y-%m-%d %H:%M")
+        if remaining_seconds <= 0:
+            reminder = "expired"
+        elif remaining_seconds <= 300:
+            reminder = "soon"
+    elif sub is None and user is not None:
+        # 会话还在但套餐已经失效：明确告诉前端需要续费
+        reminder = "expired"
+
     return JSONResponse({
         "ok": True,
         "phone": (user.phone or "") if user else "",
         "mac": cache_mac,
         "ip": (st or {}).get("ip") or sess.ip,
         "seconds": seconds,
+        "remaining_seconds": remaining_seconds,
+        "reminder": reminder,
         "down_mbps": down_mbps,
         "up_mbps": up_mbps,
         "down_kbps": round((down_mbps or 0) * 1000, 1),
@@ -664,7 +704,8 @@ def api_live(token: str = "", mac: str = "", db: Session = Depends(get_db)):
         "rssi": (st or {}).get("rssi", ""),
         "live": effective_online,
         "plan_name": sub.plan_name if sub else "",
-        "expire_at": sub.expire_at.strftime("%Y-%m-%d") if (sub and sub.expire_at) else "",
+        "expire_at": sub.expire_at.strftime("%Y-%m-%d %H:%M") if (sub and sub.expire_at) else "",
+        "expire_at_full": expire_at_full,
         "days_left": max(0, (sub.expire_at - now).days) if (sub and sub.expire_at) else -1,
         "online": online,
         "device_count": device_count,
@@ -725,6 +766,7 @@ def success(request: Request, gw_id: str = "", token: str = "", rt: str = "", db
         context={
             "request": request, "gw_id": gw_id, "token": token,
             "session": sess, "user": user, "sub": sub, "online": int(online),
+            "user_phone": (user.phone or "") if user else "",
             "site_name": settings_store.get_site_name(db),
         },
     )

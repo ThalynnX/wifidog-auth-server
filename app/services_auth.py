@@ -25,8 +25,8 @@ def new_order_no() -> str:
     return datetime.now().strftime("%Y%m%d%H%M%S") + secrets.token_hex(4).upper()
 
 
-def get_or_create_user(db, phone: str, ip: str = "") -> User:
-    """按手机号取用户，不存在则创建并发放免费体验。"""
+def get_or_create_user(db, phone: str, ip: str = "", mac: str = "", grant_trial: bool = True) -> User:
+    """按手机号取用户，不存在则创建；登录场景可发放免费体验。"""
     user = db.query(User).filter(User.phone == phone).first()
     if user:
         user.last_login_at = datetime.now()
@@ -46,40 +46,70 @@ def get_or_create_user(db, phone: str, ip: str = "") -> User:
             raise
         return user
     db.refresh(user)
-    _grant_free_trial(db, user)
+    if grant_trial:
+        _grant_free_trial(db, user, mac)
     return user
 
 
 def _get_free_plan(db) -> Plan:
-    """获取（或一次性创建）全局唯一的免费体验套餐，避免每个用户建一条 Plan。"""
-    plan = db.query(Plan).filter(Plan.type == "free", Plan.status == 0).order_by(Plan.id.asc()).first()
+    """获取（或一次性创建）全局唯一的系统免费体验套餐。
+
+    免费体验套餐不对外售卖，但可以参与发放；因此按 type=free 查找，
+    不能只看 status=0，否则后台把系统套餐置为上架后会重复创建。
+    """
+    plan = db.query(Plan).filter(Plan.type == "free").order_by(Plan.id.asc()).first()
     minutes = settings_store.get_free_trial_minutes(db)
     if not plan:
         plan = Plan(
             name="新用户体验", type="free", price=0,
-            duration_minutes=minutes, traffic_mb=FREE_TRIAL_TRAFFIC_MB, status=0,
+            duration_minutes=minutes, traffic_mb=0,
+            speed_limit_up=10000, speed_limit_down=10000, device_limit=1,
+            status=1,
+            description="系统自带体验：10 分钟，上下行 10 Mbps，超时需充值",
         )
         db.add(plan)
         db.commit()
         db.refresh(plan)
     else:
-        # 跟随后台可改的体验时长
+        # 跟随后台可改的体验时长；限速/设备数由系统套餐配置控制。
         plan.duration_minutes = minutes
         db.commit()
     return plan
 
 
-def _grant_free_trial(db, user: User):
-    """新用户赠送体验套餐（分钟数可在后台设置，0 表示不赠送）。"""
+def _device_trial_used(db, mac: str) -> bool:
+    """同一台设备是否已经领过免费体验，防止换手机号重复领取。"""
+    m = (mac or "").strip().lower()
+    if not m:
+        return False
+    uids = set()
+    for row in db.query(User.id).filter(func.lower(User.mac) == m).all():
+        uids.add(row[0])
+    for row in db.query(Session.user_id).filter(func.lower(Session.mac) == m).all():
+        uids.add(row[0])
+    if not uids:
+        return False
+    return db.query(Subscription.id).filter(
+        Subscription.user_id.in_(uids),
+        Subscription.order_id.is_(None),
+    ).first() is not None
+
+
+def _grant_free_trial(db, user: User, mac: str = ""):
+    """新用户赠送体验套餐；同一设备只能领一次（分钟数 0 表示不赠送）。"""
     if settings_store.get_free_trial_minutes(db) <= 0:
         return
     if not user.phone:
         return
     if db.query(Subscription).filter(Subscription.user_id == user.id).first():
         return
+    if _device_trial_used(db, mac):
+        logger.info("free trial skipped: device already used, user=%s mac=%s", user.id, mac)
+        return
     plan = _get_free_plan(db)
     activate_subscription(db, user, plan, order_id=None)
-    logger.info("free trial granted: user=%s minutes=%s", user.id, plan.duration_minutes)
+    logger.info("free trial granted: user=%s minutes=%s speed_down=%s device_limit=%s",
+                user.id, plan.duration_minutes, plan.speed_limit_down, plan.device_limit)
 
 
 def activate_subscription(db, user: User, plan: Plan, order_id: Optional[int] = None) -> Subscription:
@@ -505,9 +535,13 @@ def pay_order_success(db, order: Order, pay_type: str = "mock", trade_no: str = 
 
 
 def expire_subscriptions(db) -> dict:
-    """定时任务：把已到期 / 流量耗尽的有效订阅置为失效，并让这些用户的会话下线。"""
+    """定时任务：把已到期 / 流量耗尽的有效订阅置为失效，并让这些用户的会话下线。
+
+    返回的 targets 是需要在网关侧立即踢掉的 (mac, ip, gw_id) 列表；
+    仅改数据库不会让网关移除已认证客户端，调用方必须继续下发拒绝指令。
+    """
     now = datetime.now()
-    ret = {"expired": 0, "exhausted": 0, "sessions": 0}
+    ret = {"expired": 0, "exhausted": 0, "sessions": 0, "targets": []}
 
     expired_uids = [r[0] for r in db.query(Subscription.user_id).filter(
         Subscription.status == 1,
@@ -534,13 +568,55 @@ def expire_subscriptions(db) -> dict:
         ).update({"status": 3}, synchronize_session=False)
     db.commit()
 
+    seen = set()
     for uid in set(expired_uids) | set(exhausted_uids):
         user = db.query(User).filter(User.id == uid).first()
         ok, _why, _sub = check_access(db, user)
         if not ok:
+            def add_target(mac: str, ip: str, gw_id: str) -> None:
+                mac = (mac or "").lower()
+                if not mac:
+                    return
+                key = (mac, ip or "", gw_id or "")
+                if key in seen:
+                    return
+                seen.add(key)
+                ret["targets"].append({"mac": mac, "ip": ip or "", "gw_id": gw_id or ""})
+
+            # 不只看 status=1：网关侧客户端可能因为数据库 idle 清理已经 status=0，
+            # 但防火墙放行仍然存在，到期时必须按 MAC 再推一次 deny。
+            rows = db.query(Session).filter(Session.user_id == uid).order_by(Session.id.desc()).all()
+            for s in rows:
+                add_target(s.mac or "", s.ip or "", s.gw_id or "")
+            if user and user.mac:
+                last = rows[0] if rows else None
+                add_target(user.mac, last.ip if last else "", last.gw_id if last else "")
             ret["sessions"] += db.query(Session).filter(
                 Session.user_id == uid, Session.status == 1
             ).update({"status": 0, "stop_at": now}, synchronize_session=False)
+
+    # 兜底：修复前已经到期、但会话仍 status=1、订阅早已 status=2/3 的历史脏状态。
+    # 只靠“本次订阅状态发生变化”的 uid 列表抓不到这些会话。
+    stale = db.query(Session).filter(Session.status == 1).all()
+    for s in stale:
+        need_deny = bool(getattr(s, "revoked", False)) or token_expired(s)
+        if not need_deny and s.user_id:
+            user = db.query(User).filter(User.id == s.user_id).first()
+            if user:
+                ok, _why, _sub = check_access(
+                    db, user, exclude_session_id=s.id, exclude_mac=s.mac or "")
+                need_deny = not ok
+        if not need_deny:
+            continue
+        mac = (s.mac or "").lower()
+        if mac:
+            key = (mac, s.ip or "", s.gw_id or "")
+            if key not in seen:
+                seen.add(key)
+                ret["targets"].append({"mac": mac, "ip": s.ip or "", "gw_id": s.gw_id or ""})
+        s.status = 0
+        s.stop_at = now
+        ret["sessions"] += 1
     db.commit()
     return ret
 

@@ -210,8 +210,8 @@ def _v2_gateways(data) -> list:
     return []
 
 
-def _v2_client_allowed(db, c: dict, gw_id: str) -> bool:
-    """判断 counters_v2 上报的单个客户端是否仍允许上网，并顺带更新会话/流量。"""
+def _v2_client_allowed(db, c: dict, gw_id: str) -> tuple[bool, object]:
+    """判断 counters_v2 上报的单个客户端是否仍允许上网，并返回其有效套餐。"""
     token = str(c.get("token") or "")
     mac = str(c.get("mac") or "").lower()
     ip = str(c.get("ip") or "")
@@ -224,20 +224,24 @@ def _v2_client_allowed(db, c: dict, gw_id: str) -> bool:
             s.status = 0
             s.stop_at = datetime.now()
         db.commit()
-        return False
+        return False, None
 
     if ip and svc.is_ip_whitelisted(db, ip):
         wtok = svc.ip_whitelist_token(ip)
         s = svc.create_session_by_token(db, wtok, user_id=0, gw_id=gw_id, mac=mac, ip=ip)
         svc.update_traffic(db, s, incoming, outgoing, None)
-        return True
+        return True, None
 
     if mac and svc.is_mac_whitelisted(db, mac):
         svc.create_whitelist_session(db, gw_id, mac, ip)
-        return True
+        return True, None
 
     res = _auth_counters(db, token, mac, ip, incoming, outgoing, gw_id)
-    return "Auth: 1" in res
+    if "Auth: 1" not in res:
+        return False, None
+    sess = db.query(Sess).filter(Sess.token == token).first() if token else None
+    user = db.query(User).filter(User.id == sess.user_id).first() if sess and sess.user_id else None
+    return True, (svc.get_active_subscription(db, user.id) if user else None)
 
 
 async def _auth_counters_v2(request: Request, db, gw_id: str) -> str:
@@ -278,12 +282,19 @@ async def _auth_counters_v2(request: Request, db, gw_id: str) -> str:
             if cid is None:
                 continue
             seen += 1
+            sub = None
             try:
-                allowed = _v2_client_allowed(db, c, sess_gw)
+                allowed, sub = _v2_client_allowed(db, c, sess_gw)
             except Exception as e:  # noqa: BLE001  单个客户端异常不影响整批
                 logger.warning("counters_v2 client error: %s", e)
                 allowed = False
-            ops.append({"id": cid, "auth_code": 1 if allowed else 0})
+            op = {"id": cid, "auth_code": 1 if allowed else 0}
+            if allowed and sub is not None:
+                down_bps = max(0, int(getattr(sub, "speed_limit_down", 0) or 0)) * 1000
+                up_bps = max(0, int(getattr(sub, "speed_limit_up", 0) or 0)) * 1000
+                if down_bps or up_bps:
+                    op.update({"qos_present": True, "downrate_bps": down_bps, "uprate_bps": up_bps})
+            ops.append(op)
         result.append({"gw_id": gid, "auth_op": ops})
 
     if not result:
@@ -666,14 +677,77 @@ async def push_op(payload: dict) -> int:
     return 0
 
 
-async def push_client_allow(mac: str, ip: str = "", gw_id: str = "", token: str = "") -> int:
-    """云模式放行：门户登录/开通套餐后，由后台向网关推 op=auth。"""
+async def _get_client_id(mac: str) -> int | None:
+    """向网关查询客户端内部 id；counters_response 的 auth_op 需要这个 id。"""
+    resp = await ws_call({"op": "get_client_info", "mac": (mac or "").lower()}, 2.5)
+    logger.info("客户端查询 mac=%s resp=%s", mac, str(resp)[:300])
+    data = _dig_data(resp)
+    try:
+        cid = data.get("id")
+        return int(cid) if cid is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def _send_counter_action(cid: int, gw_id: str = "", auth_code: int = 0,
+                               down_bps: int = 0, up_bps: int = 0) -> int:
+    """通过 counters_response 直接操作网关客户端。
+
+    网关支持的踢下线不是 del_auth_client，而是 counters_response 里
+    auth_op[].auth_code=0；它同时会删除防火墙放行规则与 eBPF QoS。
+    """
+    op = {"id": int(cid), "auth_code": int(auth_code)}
+    if auth_code == 1 and (down_bps > 0 or up_bps > 0):
+        op.update({
+            "qos_present": True,
+            "downrate_bps": max(0, int(down_bps)),
+            "uprate_bps": max(0, int(up_bps)),
+        })
+    return await push_op({
+        "op": "counters_response",
+        "req_id": "srv-" + new_token(8),
+        "response": "counters_response",
+        "data": {
+            "type": "counters_response",
+            "result": [{"gw_id": gw_id or "", "auth_op": [op]}],
+        },
+    })
+
+
+async def _apply_qos_after_auth(mac: str, gw_id: str, down_kbps: int, up_kbps: int) -> None:
+    """放行后补一次 counters_response，把套餐限速立即写进网关 eBPF。"""
+    down_bps = max(0, int(down_kbps or 0)) * 1000
+    up_bps = max(0, int(up_kbps or 0)) * 1000
+    if not (down_bps or up_bps):
+        return
+    cid = None
+    for _ in range(4):
+        await asyncio.sleep(0.35)
+        cid = await _get_client_id(mac)
+        if cid is not None:
+            break
+    if cid is None:
+        logger.info("QoS 下发延迟：网关暂未返回客户端 id mac=%s", mac)
+        return
+    sent = await _send_counter_action(cid, gw_id, 1, down_bps, up_bps)
+    logger.info("QoS 下发 mac=%s down_bps=%s up_bps=%s sent=%s", mac, down_bps, up_bps, sent)
+
+
+async def push_client_allow(mac: str, ip: str = "", gw_id: str = "", token: str = "",
+                           down_kbps: int = 0, up_kbps: int = 0) -> int:
+    """云模式放行：门户登录/开通套餐后，由后台向网关推 op=auth。
+
+    auth 指令本身只负责放行；限速字段一并带上做兼容，同时异步补发
+    counters_response，让网关立即应用 eBPF QoS。
+    """
     if not ip:
         try:
             ip = await fetch_client_ip(mac)
         except Exception:  # noqa: BLE001
             logger.exception("查询客户端 IP 失败")
-    return await push_op({
+    down_bps = max(0, int(down_kbps or 0)) * 1000
+    up_bps = max(0, int(up_kbps or 0)) * 1000
+    sent = await push_op({
         "req_id": "srv-" + new_token(8),
         "op": "auth",
         "token": token or "",
@@ -681,18 +755,28 @@ async def push_client_allow(mac: str, ip: str = "", gw_id: str = "", token: str 
         "client_mac": (mac or "").lower(),
         "gw_id": gw_id or "",
         "once_auth": False,
+        "qos_present": bool(down_bps or up_bps),
+        "downrate_bps": down_bps,
+        "uprate_bps": up_bps,
     })
+    if sent and (down_bps or up_bps):
+        asyncio.create_task(_apply_qos_after_auth((mac or "").lower(), gw_id or "",
+                                                  int(down_kbps or 0), int(up_kbps or 0)))
+    return sent
 
 
 async def push_client_deny(mac: str, ip: str = "", gw_id: str = "") -> int:
-    return await push_op({
-        "req_id": "srv-" + new_token(8),
-        "op": "del_auth_client",
-        "client_ip": ip or "",
-        "client_mac": (mac or "").lower(),
-        "gw_id": gw_id or "",
-        "gw_channel": "apfree",
-    })
+    """踢下线：先查网关客户端 id，再用 auth_code=0 的 counters_response 移除。"""
+    mac = (mac or "").lower()
+    if not mac:
+        return 0
+    cid = await _get_client_id(mac)
+    if cid is None:
+        logger.info("踢下线跳过 mac=%s：网关已无该客户端", mac)
+        return 0
+    sent = await _send_counter_action(cid, gw_id, 0)
+    logger.info("踢下线 mac=%s ip=%s cid=%s sent=%s", mac, ip or "", cid, sent)
+    return sent
 
 
 # ------------------------------------------------------------------ WebSocket 长连接（apfree-wifidog 9.x）

@@ -20,6 +20,7 @@
         <span><span class="plan-name">{{ p.name }}</span><span class="plan-desc">
           {% if p.duration_minutes %}{{ p.duration_minutes }} 分钟{% else %}不限时长{% endif %} ·
           {% if p.traffic_mb %}{{ p.traffic_mb }} MB{% else %}不限流量{% endif %} ·
+          {% if p.speed_limit_up or p.speed_limit_down %}{% if p.speed_limit_up %}↑{{ '%g'|format(p.speed_limit_up / 1000) }}{% endif %}{% if p.speed_limit_up and p.speed_limit_down %} / {% endif %}{% if p.speed_limit_down %}↓{{ '%g'|format(p.speed_limit_down / 1000) }}{% endif %} Mbps · {% endif %}
           {{ p.device_limit or '不限' }} 台设备{% if p.valid_days %} · {{ p.valid_days }} 天有效{% endif %}
           {% if p.description %}<br>{{ p.description }}{% endif %}
         </span></span>
@@ -48,10 +49,11 @@
     const dur=p.duration_minutes?p.duration_minutes+' 分钟':'不限时长';
     const traffic=p.traffic_mb?p.traffic_mb+' MB':'不限流量';
     const devices=(p.device_limit||'不限')+' 台设备';
+    const speed=(Number(p.speed_limit_up_mbps)||Number(p.speed_limit_down_mbps))?'↑'+p.speed_limit_up_mbps+' / ↓'+p.speed_limit_down_mbps+' Mbps · ':'';
     const days=p.valid_days?' · '+p.valid_days+' 天有效':'';
     const desc=p.description?('<br>'+UI.esc(p.description).replace(/\n/g,'<br>')):'';
     return '<button class="plan-item" type="button" data-plan-id="'+Number(p.id)+'" data-plan-name="'+UI.esc(p.name)+'">'+
-      '<span><span class="plan-name">'+UI.esc(p.name)+'</span><span class="plan-desc">'+dur+' · '+traffic+' · '+devices+days+desc+'</span></span>'+
+      '<span><span class="plan-name">'+UI.esc(p.name)+'</span><span class="plan-desc">'+dur+' · '+traffic+' · '+speed+devices+days+desc+'</span></span>'+
       '<span class="plan-price"><small>¥</small>'+UI.esc(p.price_text)+'</span></button>';
   }
   async function refreshPlans(showError){

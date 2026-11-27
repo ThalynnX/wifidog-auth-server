@@ -392,17 +392,8 @@ async def user_delete(uid: int, data: UserDeleteIn, request: Request, db: Sessio
     if not u:
         return {"ok": False, "msg": "用户不存在"}
 
-    expected = u.phone or u.username or str(u.id)
-    if (data.confirm or "").strip() != expected:
-        return {"ok": False, "msg": "确认信息不匹配，请输入该用户的手机号/用户名/ID"}
-
-    sub = svc.get_active_subscription(db, uid)
-    if sub and not data.force:
-        return {
-            "ok": False,
-            "msg": f"该用户还有生效套餐「{sub.plan_name}」，如确认删除请勾选强制删除",
-            "need_force": True,
-        }
+    # 删除前只需前端二次确认；不再要求输入手机号/用户名/ID，也不再额外要求强制勾选。
+    # 生效套餐会随账号一并清理，历史订单仍保留用于财务审计。
 
     active = db.query(Sess).filter(Sess.user_id == uid).all()
     targets = [(s.mac, s.ip, s.gw_id) for s in active if s.mac and s.status == 1]
@@ -556,9 +547,9 @@ def plan_del(pid: int, request: Request, db: Session = Depends(get_db)):
     p = db.query(Plan).filter(Plan.id == pid).first()
     if not p:
         return {"ok": True}
-    # 仅系统内置的免费体验套餐（隐藏、status=0）受保护；自建的 free 套餐允许删除
-    if p.type == "free" and p.status == 0:
-        return {"ok": False, "msg": "这是系统内置的免费体验套餐（隐藏），不可删除；如需关闭免费体验，请到「系统设置」把免费体验分钟数设为 0"}
+    # 系统内置的免费体验套餐受保护；免费体验通过登录自动发放，不在门户售卖。
+    if p.type == "free":
+        return {"ok": False, "msg": "这是系统内置的免费体验套餐，不可删除；如需关闭免费体验，请到「系统设置」把免费体验分钟数设为 0"}
     # 有生效中的订阅引用时禁止删除，避免数据悬空
     in_use = db.query(func.count(Subscription.id)).filter(
         Subscription.plan_id == pid, Subscription.status == 1

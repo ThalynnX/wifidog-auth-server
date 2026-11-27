@@ -1,4 +1,5 @@
 """wifidog 认证服务端入口。"""
+import asyncio
 import logging
 import random
 import threading
@@ -75,13 +76,45 @@ def _cleanup_worker():
             db = SessionLocal()
             n = svc.cleanup_idle_sessions(db, SESSION_IDLE_TIMEOUT)
             r = svc.cleanup_expired_records(db)
-            r["subs"] = svc.expire_subscriptions(db)
+            # 到期订阅由 _expiry_worker 处理：它需要在改库后立即向网关下发踢线，
+            # 纯线程里没有事件循环，发了也收不到网关回执。
             off = svc.mark_offline_devices(db, DEVICE_OFFLINE_TIMEOUT)
             if n or r.get("sessions") or r.get("orders") or off:
                 logger.info("清理完成: 超时会话=%s 过期记录=%s 设备离线=%s", n, r, off)
             db.close()
         except Exception as e:  # noqa: BLE001
             logger.debug("cleanup error: %s", e)
+
+
+async def _expiry_worker():
+    """每 5 秒检查到期/流量耗尽订阅，改库后立即向网关踢掉对应客户端。
+
+    只改数据库不下发网关时，网关防火墙仍保留放行规则，用户会一直能上网；
+    这里用 counters_response 的 auth_op=0 移除客户端，并同时清掉 eBPF QoS。
+    """
+    await asyncio.sleep(3)
+    while True:
+        try:
+            db = SessionLocal()
+            try:
+                r = svc.expire_subscriptions(db)
+                targets = r.get("targets") or []
+            finally:
+                db.close()
+            if r.get("expired") or r.get("exhausted"):
+                logger.info("套餐到期处理: %s，待踢客户端=%s", r, len(targets))
+            for t in targets:
+                try:
+                    await wifidog.push_client_deny(
+                        t.get("mac") or "", t.get("ip") or "", t.get("gw_id") or ""
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("到期踢线失败 mac=%s: %s", t.get("mac"), e)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.warning("到期检查失败: %s", e)
+        await asyncio.sleep(5)
 
 
 @asynccontextmanager
@@ -92,8 +125,14 @@ async def lifespan(app: FastAPI):
     await ws_bus.start(wifidog.ws_bus_deliver, wifidog.ws_bus_ack)
     t = threading.Thread(target=_cleanup_worker, daemon=True)
     t.start()
+    expiry_task = asyncio.create_task(_expiry_worker(), name="wifidog-expiry-worker")
     logger.info("%s started (run_mode 初始值见后台设置)", SITE_NAME)
     yield
+    expiry_task.cancel()
+    try:
+        await expiry_task
+    except asyncio.CancelledError:
+        pass
     await ws_bus.stop()
     logger.info("%s stopped", SITE_NAME)
 

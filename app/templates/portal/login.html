@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#07111d">
 <title>{{ site_name }} · 网络认证</title>
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/static/ui.css?v=2.0.3">
+<link rel="stylesheet" href="/static/ui.css?v=2.0.1">
 </head>
 <body class="portal-body">
 <main class="portal-wrap">
@@ -52,6 +52,7 @@
       <button class="btn secondary block" id="alipayLogin" type="button" style="margin-top:12px">支付宝授权登录</button>
       <div class="form-msg" id="alipayMsg" role="status" aria-live="polite"></div>
       {% endif %}
+      <button class="btn ghost block hide" id="autoLoginBtn" type="button" style="margin-top:9px">本机已认证，直接连接</button>
     </div>
 
     <form id="rebindArea" class="hide" novalidate>
@@ -66,9 +67,9 @@
 
     <div class="portal-foot">连接即表示你同意遵守网络使用规范<br><span class="mono" id="gatewayInfo">{{ gw_id or 'GATEWAY' }} · ENCRYPTED SESSION</span></div>
   </section>
-  <div style="text-align:center;margin-top:18px" class="eyebrow">WIFIDOG AUTH SERVER · V2.0.3</div>
+  <div style="text-align:center;margin-top:18px" class="eyebrow">WIFIDOG AUTH SERVER · V2.0.1</div>
 </main>
-<script src="/static/ui.js?v=2.0.3"></script>
+<script src="/static/ui.js?v=2.0.1"></script>
 <script>
 (function(){
   const $ = id => document.getElementById(id);
@@ -182,10 +183,19 @@
 
   async function autoDevice(){
     if(!params.mac||!params.gw_id||changeToken)return;
-    const box=$('autoStatus');box.textContent='正在识别已认证设备…';box.classList.remove('hide');
+    const btn=$('autoLoginBtn'),box=$('autoStatus');
+    UI.busy(btn,true,'识别中…');box.textContent='正在识别已认证设备…';box.classList.remove('hide');
     const r=await UI.post('/portal/api/device/auto',{mac:params.mac,ip:params.ip,gw_id:params.gw_id},{silent:true});
-    if(r.ok){saveSession(r.token||'',r.phone||'');box.textContent=r.msg||'设备已识别，正在自动放行';setTimeout(()=>location.href=successUrl(r.token||''),500);}
-    else box.classList.add('hide');
+    UI.busy(btn,false);
+    if(r.ok){
+      // device/auto 只返回脱敏手机号；购买页需要的完整手机号由成功页服务端注入。
+      store.remove('wg_phone');
+      saveSession(r.token||'','');
+      box.textContent=r.msg||'设备已识别，正在自动放行';
+      setTimeout(()=>location.href=successUrl(r.token||''),500);
+    }else{
+      box.textContent=r.msg||'未识别到已认证设备，请输入手机号登录';
+    }
   }
   async function checkHealth(){
     try{
@@ -200,7 +210,9 @@
     }
   }
   checkHealth();setInterval(checkHealth,5000);
-  autoDevice();
+  // 不再自动登录：自动放行会阻止用户切换账号。改为用户主动点“本机已认证，直接连接”。
+  if(params.mac&&params.gw_id&&!changeToken) $('autoLoginBtn').classList.remove('hide');
+  $('autoLoginBtn').onclick=autoDevice;
 })();
 </script>
 </body>

@@ -230,7 +230,7 @@ async function loadUsers(page = 1) {
     '<span class="tag ' + (u.device_remaining > 0 ? 'info' : 'bad') + '">已用 ' + u.device_used + ' / ' + u.device_limit + '</span><br><span class="muted">剩余 ' + u.device_remaining + ' 次</span>',
     u.online,
     u.status === 1 ? '<span class="tag">正常</span>' : '<span class="tag bad">禁用</span>', UI.esc(u.created_at),
-    '<div class="actions"><button class="btn small secondary" onclick="openUserControl(' + u.id + ')">控制</button><button class="btn small secondary" onclick="subscribeUser(' + u.id + ')">套餐</button><button class="btn small ' + (u.status === 1 ? 'danger' : '') + '" onclick="toggleUser(' + u.id + ',' + u.status + ')">' + (u.status === 1 ? '禁用' : '启用') + '</button></div>'
+    '<div class="actions"><button class="btn small secondary" onclick="openUserControl(' + u.id + ')">控制</button><button class="btn small secondary" onclick="subscribeUser(' + u.id + ')">套餐</button><button class="btn small ' + (u.status === 1 ? 'danger' : '') + '" onclick="toggleUser(' + u.id + ',' + u.status + ')">' + (u.status === 1 ? '禁用' : '启用') + '</button><button class="btn small danger" onclick="deleteUser(' + u.id + ')">删除</button></div>'
   ]), '完成门户登录后才会产生用户；白名单设备请到在线会话查看');
   $('usersPager').innerHTML = UI.pager('users', state.usersPage, 20, r.total, 'loadUsers');
 }
@@ -290,9 +290,8 @@ async function openUserControl(id) {
     '<div class="panel" style="margin-top:14px"><div class="panel-head"><div><div class="panel-title">设备控制</div><div class="panel-desc">解绑或改绑会结束当前在线会话；管理员操作不计入自助换绑次数。</div></div><div class="actions"><button class="btn small secondary" onclick="openBindDevice(' + u.id + ')">改绑 MAC</button><button class="btn small danger" onclick="unbindUserDevice(' + u.id + ')">解绑当前设备</button></div></div>' +
     (sessions.length ? UI.table(['网关', 'MAC', 'IP', '最近上报', '操作'], sessions.map(s => [UI.esc(s.gw_id || '-'), '<span class="mono">' + UI.esc(s.mac || '-') + '</span>', '<span class="mono">' + UI.esc(s.ip || '-') + '</span>', UI.esc(s.last_update_at), '<button class="btn small danger" onclick="kickUserSession(' + s.id + ',' + u.id + ')">踢下线</button>'])) : '<div class="empty" style="padding:18px">当前没有在线会话</div>') +
     '</div>' +
-    '<div class="panel" style="margin-top:14px"><div class="panel-head"><div><div class="panel-title">账号操作</div><div class="panel-desc">删除会清空账号、订阅和会话；订单保留用于审计。</div></div></div><div class="panel-body"><div class="actions">' +
+    '<div class="panel" style="margin-top:14px"><div class="panel-head"><div><div class="panel-title">账号操作</div><div class="panel-desc">禁用会立即结束该用户的在线会话；恢复后账号可继续使用。</div></div></div><div class="panel-body"><div class="actions">' +
     '<button class="btn small ' + (u.status === 1 ? 'danger' : '') + '" onclick="toggleUser(' + u.id + ',' + u.status + ',true)">' + (u.status === 1 ? '禁用账号' : '恢复账号') + '</button>' +
-    '<button class="btn small danger" onclick="deleteUser(' + u.id + ')">删除用户</button>' +
     '</div></div></div>';
   const layer = openModal({title: '用户控制 · ' + (u.nickname || u.phone || ('#' + u.id)), body: body, okText: '关闭', onOk: () => true});
   return layer;
@@ -380,13 +379,9 @@ async function deleteUser(id) {
   closeModals();
   openModal({title: '删除用户 · ' + (u.nickname || expected), danger: true, okText: '确认删除',
     body: '<div class="notice" style="border-color:rgba(255,90,90,.35)">删除会立即结束该用户所有会话、清空绑定设备、删除订阅和验证码；<strong>历史订单保留用于财务审计</strong>。此操作不可撤销。</div>' +
-      '<div class="field"><label>输入账号确认</label><input class="input mono" id="del_confirm" placeholder="' + UI.esc(expected) + '"><span class="help">请输入 ' + UI.esc(expected) + ' 才会执行删除。</span></div>' +
-      '<label style="display:flex;gap:8px;align-items:center;margin-top:12px;color:var(--muted)"><input type="checkbox" id="del_force"> 该用户有生效套餐，仍然强制删除</label>',
+      '<div class="field"><label>账号</label><div class="mono" style="font-size:15px;color:var(--text)">' + UI.esc(expected) + '</div><span class="help">确认删除该用户即可，无需再输入账号。</span></div>',
     onOk: async layer => {
-      const confirm = layer.querySelector('#del_confirm').value.trim();
-      if (confirm !== expected) return '确认账号不匹配';
-      const force = layer.querySelector('#del_force').checked;
-      const res = await UI.post('/admin/api/users/' + id + '/delete', {confirm: confirm, force: force});
+      const res = await UI.post('/admin/api/users/' + id + '/delete', {});
       if (!res.ok) return res.msg || '删除失败';
       UI.toast(res.msg || '用户已删除');
       loadUsers(state.usersPage);
@@ -427,6 +422,17 @@ async function delDevice(id) {
   UI.toast(r.ok ? '设备已删除' : (r.msg || '删除失败'), r.ok ? 'ok' : 'error'); if (r.ok) loadDevices();
 }
 
+function mbpsText(kbps) {
+  const n = Number(kbps) || 0;
+  if (n <= 0) return '不限';
+  return (n / 1000).toFixed(n % 1000 === 0 ? 0 : 2) + ' Mbps';
+}
+function mbpsInput(kbps) {
+  const n = Number(kbps) || 0;
+  if (n <= 0) return '0';
+  return String(Number((n / 1000).toFixed(2)));
+}
+
 async function loadPlans() {
   const r = await UI.api('/admin/api/plans');
   if (!r.ok) return UI.toast(r.msg || '套餐加载失败', 'error');
@@ -436,7 +442,7 @@ async function loadPlans() {
     p.id, '<strong>' + UI.esc(p.name) + '</strong>' + (p.description ? '<br><span class="muted">' + UI.esc(p.description) + '</span>' : ''),
     (types[p.type] || UI.esc(p.type)) + '<br><span class="num">' + UI.money(p.price) + '</span>',
     (p.duration_minutes ? p.duration_minutes + ' 分钟' : '不限时长') + '<br><span class="muted">' + (p.traffic_mb ? p.traffic_mb + ' MB' : '不限流量') + '</span>',
-    p.valid_days ? p.valid_days + ' 天' : '-', (p.device_limit || '不限') + ' 台<br><span class="muted">↑' + (p.speed_limit_up || '不限') + ' / ↓' + (p.speed_limit_down || '不限') + ' kbps</span>',
+    p.valid_days ? p.valid_days + ' 天' : '-', (p.device_limit || '不限') + ' 台<br><span class="muted">↑' + mbpsText(p.speed_limit_up) + ' / ↓' + mbpsText(p.speed_limit_down) + '</span>',
     p.status === 1 ? '<span class="tag">上架</span>' : '<span class="tag off">下架</span>', p.sort,
     '<div class="actions"><button class="btn small secondary" onclick="editPlan(' + p.id + ')">编辑</button><button class="btn small danger" onclick="delPlan(' + p.id + ')">删除</button></div>'
   ]), '创建套餐后，用户即可在门户看到并购买');
@@ -446,13 +452,13 @@ function editPlan(id) {
   const p = id ? state.plans.find(x => x.id === id) : null;
   const val = (key, fallback = 0) => p && p[key] !== null && p[key] !== undefined ? p[key] : fallback;
   openModal({title: p ? '编辑套餐 · ' + p.name : '新增套餐',
-    body: '<div class="form-grid"><div class="field full"><label>套餐名称</label><input class="input" id="p_name" maxlength="128" value="' + (p ? UI.esc(p.name) : '') + '" placeholder="例如 24 小时畅享"></div><div class="field"><label>套餐类型</label><select class="select" id="p_type"><option value="time">时长套餐</option><option value="flow">流量套餐</option><option value="period">包期套餐</option><option value="free">免费体验</option></select></div><div class="field"><label>价格（分）</label><input class="input" id="p_price" type="number" min="0" value="' + val('price') + '"><span class="help">100 分 = 1 元</span></div><div class="field"><label>时长（分钟）</label><input class="input" id="p_dur" type="number" min="0" value="' + val('duration_minutes') + '"><span class="help">0 = 不限</span></div><div class="field"><label>流量（MB）</label><input class="input" id="p_mb" type="number" min="0" value="' + val('traffic_mb') + '"><span class="help">0 = 不限</span></div><div class="field"><label>有效期（天）</label><input class="input" id="p_days" type="number" min="0" value="' + val('valid_days') + '"><span class="help">0 = 按套餐时长</span></div><div class="field"><label>同时在线设备数</label><input class="input" id="p_dev" type="number" min="0" value="' + val('device_limit') + '"><span class="help">0 = 不限</span></div><div class="field"><label>上行限速（kbps）</label><input class="input" id="p_up" type="number" min="0" value="' + val('speed_limit_up') + '"><span class="help">0 = 不限</span></div><div class="field"><label>下行限速（kbps）</label><input class="input" id="p_down" type="number" min="0" value="' + val('speed_limit_down') + '"><span class="help">0 = 不限</span></div><div class="field"><label>状态</label><select class="select" id="p_st"><option value="1">上架</option><option value="0">下架</option></select></div><div class="field"><label>排序</label><input class="input" id="p_sort" type="number" value="' + val('sort') + '"><span class="help">越大越靠前</span></div><div class="field full"><label>套餐说明</label><input class="input" id="p_desc" maxlength="500" value="' + (p ? UI.esc(p.description || '') : '') + '"></div></div>',
+    body: '<div class="form-grid"><div class="field full"><label>套餐名称</label><input class="input" id="p_name" maxlength="128" value="' + (p ? UI.esc(p.name) : '') + '" placeholder="例如 24 小时畅享"></div><div class="field"><label>套餐类型</label><select class="select" id="p_type"><option value="time">时长套餐</option><option value="flow">流量套餐</option><option value="period">包期套餐</option><option value="free">免费体验</option></select></div><div class="field"><label>价格（分）</label><input class="input" id="p_price" type="number" min="0" value="' + val('price') + '"><span class="help">100 分 = 1 元</span></div><div class="field"><label>时长（分钟）</label><input class="input" id="p_dur" type="number" min="0" value="' + val('duration_minutes') + '"><span class="help">0 = 不限</span></div><div class="field"><label>流量（MB）</label><input class="input" id="p_mb" type="number" min="0" value="' + val('traffic_mb') + '"><span class="help">0 = 不限</span></div><div class="field"><label>有效期（天）</label><input class="input" id="p_days" type="number" min="0" value="' + val('valid_days') + '"><span class="help">0 = 按套餐时长</span></div><div class="field"><label>同时在线设备数</label><input class="input" id="p_dev" type="number" min="0" value="' + val('device_limit') + '"><span class="help">0 = 不限</span></div><div class="field"><label>上行限速（Mbps）</label><input class="input" id="p_up" type="number" min="0" step="0.01" value="' + mbpsInput(val('speed_limit_up')) + '"><span class="help">0 = 不限；1 Mbps = 1000 kbps</span></div><div class="field"><label>下行限速（Mbps）</label><input class="input" id="p_down" type="number" min="0" step="0.01" value="' + mbpsInput(val('speed_limit_down')) + '"><span class="help">0 = 不限；1 Mbps = 1000 kbps</span></div><div class="field"><label>状态</label><select class="select" id="p_st"><option value="1">上架</option><option value="0">下架</option></select></div><div class="field"><label>排序</label><input class="input" id="p_sort" type="number" value="' + val('sort') + '"><span class="help">越大越靠前</span></div><div class="field full"><label>套餐说明</label><input class="input" id="p_desc" maxlength="500" value="' + (p ? UI.esc(p.description || '') : '') + '"></div></div>',
     onOk: async layer => {
       const g = id => layer.querySelector('#' + id);
       const name = g('p_name').value.trim(); if (!name) return '请填写套餐名称';
       const nums = ['p_price','p_dur','p_mb','p_days','p_dev','p_up','p_down'].map(id => Number(g(id).value || 0));
       if (nums.some(n => !Number.isFinite(n) || n < 0)) return '价格、时长、流量、设备数和限速必须是非负数字';
-      const r = await UI.post('/admin/api/plans', {id: id || null, name, type: g('p_type').value, price: nums[0], duration_minutes: nums[1], traffic_mb: nums[2], valid_days: nums[3], device_limit: nums[4], speed_limit_up: nums[5], speed_limit_down: nums[6], status: Number(g('p_st').value), sort: Number(g('p_sort').value || 0), description: g('p_desc').value});
+      const r = await UI.post('/admin/api/plans', {id: id || null, name, type: g('p_type').value, price: nums[0], duration_minutes: nums[1], traffic_mb: nums[2], valid_days: nums[3], device_limit: nums[4], speed_limit_up: Math.round(nums[5] * 1000), speed_limit_down: Math.round(nums[6] * 1000), status: Number(g('p_st').value), sort: Number(g('p_sort').value || 0), description: g('p_desc').value});
       if (r.ok) { UI.toast(p ? '套餐已更新' : '套餐已创建'); loadPlans(); return true; }
       return r.msg || '保存失败';
     }});
