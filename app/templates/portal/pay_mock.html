@@ -30,7 +30,7 @@
   const say=(text,type)=>{msg.textContent=text||'';msg.className='form-msg'+(type?' '+type:'');};
   const statusText={0:'待支付',1:'已支付',2:'已关闭',3:'已退款'};
   let finished=false,busy=false;
-  const success=()=>{statusBtn.classList.remove('hide');statusBtn.onclick=()=>location.href='/portal/success?token='+encodeURIComponent(get('wg_token'))+'&gw_id='+encodeURIComponent(get('wg_gw_id'));};
+  const success=()=>{statusBtn.classList.remove('hide');statusBtn.onclick=()=>location.href='/portal/success?gw_id='+encodeURIComponent(get('wg_gw_id'));};
   async function recoverSession(){
     const mac=get('wg_mac'),gwId=get('wg_gw_id');if(!mac||!gwId)return;
     say('套餐已开通，正在建立设备会话…','info');
@@ -53,7 +53,7 @@
     if(r.ok)await applyStatus(Number(r.status),true);
   }
   if({{ 1 if order.status == 1 else 0 }}){finished=true;success();}
-  document.getElementById('backBtn').onclick=()=>location.href='/portal/plans?phone='+encodeURIComponent(get('wg_phone'))+'&token='+encodeURIComponent(get('wg_token'));
+  document.getElementById('backBtn').onclick=()=>location.href='/portal/plans?phone='+encodeURIComponent(get('wg_phone'));
   btn.onclick=async function(){
     if(btn.dataset.busy==='1'||btn.disabled)return;
     if(!await UI.confirm({title:'确认模拟支付',text:'确认支付订单 {{ order.order_no }}？测试环境不会真实扣款。',okText:'确认支付'}))return;

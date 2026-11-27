@@ -1,0 +1,11 @@
+# /etc/logrotate.d/wifidog
+/longlong/wifidog/logs/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su www www
+}

@@ -20,9 +20,9 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from .. import alipay, payment, ratelimit, realtime, services_auth as svc, sms, settings_store
+from .. import alipay, netutil, payment, ratelimit, realtime, services_auth as svc, sms, settings_store
 from ..config import (
-    ALIPAY_APPID, ALIPAY_RETURN_URL, ALIPAY_SELLER_ID,
+    ALIPAY_APPID, ALIPAY_RETURN_URL, ALIPAY_SELLER_ID, COOKIE_SECURE,
     SMS_CODE_EXPIRE, SMS_DAILY_LIMIT, SMS_IP_HOURLY_LIMIT,
 )
 from ..database import get_db
@@ -42,9 +42,35 @@ SEND_IP_LIMIT = (SMS_IP_HOURLY_LIMIT, 3600)  # 每 IP 每小时发送上限
 BUY_IP_LIMIT = (10, 3600)        # 每 IP 每小时最多创建 10 笔订单
 
 
+DEVICE_COOKIE = device_auth.DEVICE_COOKIE
+TOKEN_COOKIE = "wd_token"
+
+
 def _ip(request: Request) -> str:
-    xf = request.headers.get("x-forwarded-for")
-    return xf.split(",")[0].strip() if xf else (request.client.host if request.client else "")
+    return netutil.client_ip(request)
+
+
+def _mask_phone(phone: str) -> str:
+    p = phone or ""
+    return (p[:3] + "****" + p[-4:]) if len(p) >= 7 else ""
+
+
+def _device_json(payload: dict, user_id=None, mac: str = "", token: str = "",
+                 status_code: int = 200) -> JSONResponse:
+    """统一写设备票据/登录票据 Cookie；token 不再只依赖 URL。"""
+    resp = JSONResponse(payload, status_code=status_code)
+    if user_id and mac:
+        resp.set_cookie(
+            DEVICE_COOKIE, device_auth.issue_device_cookie(int(user_id), mac),
+            httponly=True, samesite="lax", secure=COOKIE_SECURE,
+            max_age=device_auth.DEVICE_COOKIE_TTL,
+        )
+    if token:
+        resp.set_cookie(
+            TOKEN_COOKIE, token, httponly=True, samesite="lax",
+            secure=COOKIE_SECURE, max_age=86400,
+        )
+    return resp
 
 
 class SendCodeIn(BaseModel):
@@ -100,12 +126,15 @@ def send_code(data: SendCodeIn, request: Request, db: Session = Depends(get_db))
     if cnt >= SMS_DAILY_LIMIT:
         return JSONResponse({"ok": False, "msg": "今日验证码发送已达上限"})
 
+    provider = settings_store.sms_provider(db)
+    if not provider:
+        return JSONResponse({"ok": False, "msg": "短信通道未配置，请联系管理员"})
+
     code = sms.generate_code()
     db.add(SmsCode(phone=phone, code=code, purpose="login", ip=ip,
                    expire_at=datetime.now() + timedelta(seconds=SMS_CODE_EXPIRE)))
     db.commit()
 
-    provider = settings_store.sms_provider(db)
     ok = sms.send_code(phone, code, provider)
     if not ok:
         return JSONResponse({"ok": False, "msg": "验证码发送失败，请稍后重试"})
@@ -151,6 +180,8 @@ async def login(data: LoginIn, request: Request, db: Session = Depends(get_db)):
         return JSONResponse({"ok": False, "msg": "尝试过于频繁，请10分钟后再试"})
     if not ratelimit.check(f"login:ph:{phone}", 10, 600):
         return JSONResponse({"ok": False, "msg": "该手机号尝试过于频繁，请稍后再试"})
+    if data.gw_id and not svc.gateway_active(db, data.gw_id):
+        return JSONResponse({"ok": False, "msg": "网关未登记或已停用，请联系管理员"})
 
     # MAC 黑名单优先级最高：命中一律拒绝（云模式下网关不走 /auth，必须在这里拦）
     if data.mac and svc.is_mac_blacklisted(db, data.mac):
@@ -200,7 +231,8 @@ async def login(data: LoginIn, request: Request, db: Session = Depends(get_db)):
             db.commit()
             svc.mark_authenticated(db, sess, "login", user_id=user.id, phone=phone,
                                   gw_id=data.gw_id, mac=data.mac, ip=ip, reason="mac_whitelisted")
-        return JSONResponse({"ok": True, "redirect": "", "token": token, "whitelisted": True})
+        return _device_json({"ok": True, "redirect": "", "token": token, "whitelisted": True},
+                            user.id, data.mac, token)
 
     ok, reason, _sub = svc.check_access(db, user, exclude_mac=(data.mac or ""))
     if not ok:
@@ -228,7 +260,8 @@ async def login(data: LoginIn, request: Request, db: Session = Depends(get_db)):
         svc.mark_authenticated(db, sess, "login", user_id=user.id, phone=phone,
                               gw_id=data.gw_id, mac=data.mac, ip=ip, reason="portal_login")
     # 云模式放行已由 WebSocket 下发完成，不再跳网关 /wifidog/auth
-    return JSONResponse({"ok": True, "redirect": "", "token": token})
+    return _device_json({"ok": True, "redirect": "", "token": token},
+                        user.id, data.mac, token)
 
 
 
@@ -249,18 +282,33 @@ async def device_rebind(data: RebindIn, request: Request, db: Session = Depends(
     user = db.query(User).filter(User.id == uid).first()
     if not user:
         return JSONResponse({"ok": False, "msg": "账号不存在，请重新登录"})
+    if data.gw_id and not svc.gateway_active(db, data.gw_id):
+        return JSONResponse({"ok": False, "msg": "网关未登记或已停用，请联系管理员"})
 
-    ok, msg = device_auth.rebind(db, user, data.mac or tok_mac)
+    old_mac = device_auth.get_bound_mac(user)
+    effective_mac = device_auth.normalize_mac(data.mac or tok_mac)
+    ok, msg = device_auth.rebind(db, user, effective_mac)
     if not ok:
         return JSONResponse({"ok": False, "msg": msg, "need_buy": "套餐" in msg})
 
-    token = issue_token(db, user.id, data.gw_id, data.mac)
+    # 换绑后旧设备必须立即失去授权，不能被 counters 重新放行。
+    if old_mac and old_mac != effective_mac:
+        targets = []
+        for x in db.query(Sess).filter(Sess.user_id == user.id, Sess.mac == old_mac).all():
+            targets.append((x.mac, x.ip, x.gw_id))
+            x.status = 0
+            x.stop_at = datetime.now()
+            x.revoked = True
+        db.commit()
+        svc.enqueue_kick(db, targets, reason=f"device_rebind:{user.id}", user_id=user.id)
+
+    token = issue_token(db, user.id, data.gw_id, effective_mac)
     ip = data.ip or _ip(request)
     sub = svc.get_active_subscription(db, user.id)
     sent = 0
     try:
         sent = await push_client_allow(
-            data.mac, ip, data.gw_id, token,
+            effective_mac, ip, data.gw_id, token,
             down_kbps=(sub.speed_limit_down if sub else 0),
             up_kbps=(sub.speed_limit_up if sub else 0),
         )
@@ -276,7 +324,8 @@ async def device_rebind(data: RebindIn, request: Request, db: Session = Depends(
         db.commit()
         svc.mark_authenticated(db, sess, "device_rebind", user_id=user.id, phone=phone,
                               gw_id=data.gw_id, mac=data.mac, ip=ip, reason=msg)
-    return JSONResponse({"ok": True, "msg": "已更换绑定设备，现在可以直接上网了", "token": token})
+    return _device_json({"ok": True, "msg": "已更换绑定设备，现在可以直接上网了", "token": token},
+                        user.id, effective_mac, token)
 
 
 
@@ -288,19 +337,28 @@ class AutoIn(BaseModel):
 
 @router.post("/api/device/auto")
 async def device_auto(data: AutoIn, request: Request, db: Session = Depends(get_db)):
-    """已认证设备（MAC 未变）自动放行，免重复认证；MAC 变了不会命中。"""
+    """已认证设备自动放行。
+
+    必须携带服务端签发的 HttpOnly 设备票据（用户+MAC 签名），不能仅凭 MAC
+    猜测/枚举已有用户，否则任意人可冒用他人套餐。
+    """
     mac = device_auth.normalize_mac(data.mac)
     if not mac:
-        return JSONResponse({"ok": False})
-    user = db.query(User).filter(func.lower(User.mac) == mac).first()
+        return JSONResponse({"ok": False, "need_login": True})
+    ticket = device_auth.verify_device_cookie(request.cookies.get(DEVICE_COOKIE, ""))
+    if not ticket or ticket[1] != mac:
+        return JSONResponse({"ok": False, "need_login": True})
+    user = db.query(User).filter(User.id == ticket[0], User.status == 1).first()
     if not user:
-        return JSONResponse({"ok": False})
+        return JSONResponse({"ok": False, "need_login": True})
 
+    if data.gw_id and not svc.gateway_active(db, data.gw_id):
+        return JSONResponse({"ok": False, "msg": "网关未登记或已停用，请联系管理员"})
     if svc.is_mac_blacklisted(db, mac):  # mac_blacklisted_auto
         return JSONResponse({"ok": False, "msg": "该设备已被禁止上网，请联系管理员"})
     ok, reason, _sub = svc.check_access(db, user, exclude_mac=mac)
     if not ok:
-        return JSONResponse({"ok": False, "msg": reason})
+        return JSONResponse({"ok": False, "msg": reason, "need_buy": True})
 
     ip = data.ip or _ip(request)
     sess = svc.active_session_for_device(db, user.id, mac)
@@ -325,9 +383,10 @@ async def device_auto(data: AutoIn, request: Request, db: Session = Depends(get_
         svc.mark_authenticated(db, sess, "device_auto", user_id=user.id,
                               phone=user.phone or "", gw_id=data.gw_id, mac=mac, ip=ip,
                               reason="known_device")
-    return JSONResponse({"ok": True, "msg": "已识别已认证设备，正在自动放行",
-                         "phone": (user.phone or "")[:3] + "****" + (user.phone or "")[-4:],
-                         "token": token})
+    return _device_json({
+        "ok": True, "msg": "已识别已认证设备，正在自动放行",
+        "phone": _mask_phone(user.phone or ""), "token": token,
+    }, user.id, mac, token)
 
 
 @router.post("/api/password_login")
@@ -336,17 +395,26 @@ async def password_login(data: PwdLoginIn, request: Request, db: Session = Depen
     if not ratelimit.check(f"pwdlogin:ip:{ip}", 10, 600):
         return JSONResponse({"ok": False, "msg": "尝试过于频繁，请稍后再试"})
 
-    user = db.query(User).filter(User.username == data.username).first()
+    if data.gw_id and not svc.gateway_active(db, data.gw_id):
+        return JSONResponse({"ok": False, "msg": "网关未登记或已停用，请联系管理员"})
+    user = db.query(User).filter(User.username == data.username, User.status == 1).first()
     if not user or not user.password_hash or not verify_password(data.password, user.password_hash):
         return JSONResponse({"ok": False, "msg": "账号或密码错误"})
-    ok, reason, sub = svc.check_access(db, user, exclude_mac=(data.mac or ""))
+    if data.mac and svc.is_mac_blacklisted(db, data.mac):
+        return JSONResponse({"ok": False, "msg": "该设备已被禁止上网，请联系管理员"})
+    dev_ok, dev_code, dev_msg = device_auth.check_device(db, user, data.mac)
+    if not dev_ok:
+        return JSONResponse({"ok": False, "msg": dev_msg, "need_device": True,
+                             "change_token": device_auth.issue_change_token(user.id, user.phone or "", data.mac)})
+    mac = device_auth.normalize_mac(data.mac)
+    ok, reason, sub = svc.check_access(db, user, exclude_mac=mac)
     if not ok:
         return JSONResponse({"ok": False, "msg": reason, "need_buy": True})
-    token = issue_token(db, user.id, data.gw_id, data.mac)
+    token = issue_token(db, user.id, data.gw_id, mac)
     sent = 0
     try:
         sent = await push_client_allow(
-            data.mac, ip, data.gw_id, token,
+            mac, ip, data.gw_id, token,
             down_kbps=(sub.speed_limit_down if sub else 0),
             up_kbps=(sub.speed_limit_up if sub else 0),
         )
@@ -361,12 +429,12 @@ async def password_login(data: PwdLoginIn, request: Request, db: Session = Depen
         sess.last_update_at = datetime.now()
         db.commit()
         svc.mark_authenticated(db, sess, "login", user_id=user.id, phone=user.phone or "",
-                              gw_id=data.gw_id, mac=data.mac, ip=ip, reason="password_login")
-    return JSONResponse({
+                              gw_id=data.gw_id, mac=mac, ip=ip, reason="password_login")
+    return _device_json({
         "ok": True,
         "redirect": build_gateway_redirect(data.gw_address, data.gw_port, token, data.gw_id),
         "token": token,
-    })
+    }, user.id, mac, token)
 
 
 # ------------------------------------------------------------------ 套餐与购买
@@ -417,13 +485,20 @@ def buy(data: BuyIn, request: Request, db: Session = Depends(get_db)):
         return JSONResponse({"ok": False, "msg": "套餐不存在或已下架"})
 
     phone = (data.phone or "").strip()
-    token = (data.token or "").strip()
+    body_token = (data.token or "").strip()
+    cookie_token = (request.cookies.get(TOKEN_COOKIE, "") or "").strip()
+    token = body_token or cookie_token
     user = None
     if token:
         sess = db.query(Sess).filter(Sess.token == token).first()
-        if not sess:
-            return JSONResponse({"ok": False, "msg": "登录状态已失效，请重新登录"})
-        user = db.query(User).filter(User.id == sess.user_id).first()
+        if not sess or getattr(sess, "revoked", False) or svc.token_expired(sess):
+            # 前端 localStorage 可能残留旧 token；此时退回 HttpOnly Cookie 再试一次。
+            if body_token and cookie_token and cookie_token != body_token:
+                sess = db.query(Sess).filter(Sess.token == cookie_token).first()
+                token = cookie_token
+            if not sess or getattr(sess, "revoked", False) or svc.token_expired(sess):
+                return JSONResponse({"ok": False, "msg": "登录状态已失效，请重新登录"})
+        user = db.query(User).filter(User.id == sess.user_id, User.status == 1).first()
 
     if user is None:
         if _bad_phone(phone):
@@ -449,6 +524,8 @@ def buy(data: BuyIn, request: Request, db: Session = Depends(get_db)):
 
     # 关键：支付渠道由服务端决定，客户端无法指定 mock（P0-2）
     pay_type = settings_store.pay_provider(db)
+    if not pay_type:
+        return JSONResponse({"ok": False, "msg": "支付渠道未配置，请联系管理员"})
     order.pay_type = pay_type
     db.commit()
     if pay_type == "mock" and not settings_store.is_test_mode(db):
@@ -462,13 +539,20 @@ def buy(data: BuyIn, request: Request, db: Session = Depends(get_db)):
     result = payment.create_charge(order.order_no, plan.price, plan.name, pay_type, return_url=return_url)
     if result.get("code") != 0:
         return JSONResponse({"ok": False, "msg": result.get("message", "支付发起失败")})
-    return JSONResponse({
+    resp = JSONResponse({
         "ok": True,
         "order_no": order.order_no,
         "pay_url": result.get("pay_url"),
         "qr": result.get("qr", False),
         "token": token,
     })
+    if token:
+        # 购买页/支付回跳页依赖 HttpOnly Cookie 读取登录态，不再把 token 放 URL。
+        resp.set_cookie(
+            TOKEN_COOKIE, token, httponly=True, samesite="lax",
+            secure=COOKIE_SECURE, max_age=86400,
+        )
+    return resp
 
 
 @router.get("/pay/mock", response_class=HTMLResponse)
@@ -521,14 +605,18 @@ async def pay_confirm(request: Request, db: Session = Depends(get_db)):
         return JSONResponse({"ok": False, "msg": "订单已超时关闭，请重新下单"})
     if order.status == 1:
         return JSONResponse({"ok": False, "msg": "订单已支付，无需重复确认"})
-    svc.pay_order_success(db, order, pay_type="mock", trade_no=order_no)
+    if order.status == 3:
+        return JSONResponse({"ok": False, "msg": "订单已退款，不能再次支付"})
+    ok = svc.pay_order_success(db, order, pay_type="mock", trade_no=order_no)
+    if not ok:
+        return JSONResponse({"ok": False, "msg": "开通失败，请稍后重试或联系管理员"})
     return JSONResponse({"ok": True, "msg": "支付成功，套餐已开通"})
 
 
 # ------------------------------------------------------------------ 支付回调（真实渠道）
 def _finish_paid_order(db, order, pay_type: str, trade_no: str) -> str:
-    svc.pay_order_success(db, order, pay_type=pay_type, trade_no=trade_no)
-    return "success"
+    ok = svc.pay_order_success(db, order, pay_type=pay_type, trade_no=trade_no)
+    return "success" if ok else "fail"
 
 
 @router.post("/api/pay/notify/alipay")
@@ -582,11 +670,23 @@ async def alipay_notify(request: Request, db: Session = Depends(get_db)):
 
     status = data.get("trade_status")
     if status in ("TRADE_SUCCESS", "TRADE_FINISHED"):
-        if order.status in (1, 3):
+        if order.status == 3:
             db.commit()
             return HTMLResponse("success")
+        if order.status == 1:
+            # 已支付但权益账本缺失（上次开通中途崩溃）：补开一次再应答。
+            result = _finish_paid_order(db, order, pay_type, order.trade_no)
+            if result != "success":
+                db.query(PaymentEvent).filter(PaymentEvent.event_key == event_key).delete()
+                db.commit()
+            return HTMLResponse(result)
         try:
-            return HTMLResponse(_finish_paid_order(db, order, pay_type, order.trade_no))
+            result = _finish_paid_order(db, order, pay_type, order.trade_no)
+            if result != "success":
+                # 开通失败（如套餐被删除）时删除事件，允许支付宝/微信重试或人工补单。
+                db.query(PaymentEvent).filter(PaymentEvent.event_key == event_key).delete()
+                db.commit()
+            return HTMLResponse(result)
         except Exception:  # noqa: BLE001
             db.rollback()
             # 本地开通失败时移除事件，允许支付宝重试
@@ -638,27 +738,43 @@ async def wechat_notify(request: Request, db: Session = Depends(get_db)):
 
 # ------------------------------------------------------------------ 实时状态
 @router.get("/api/live")
-def api_live(token: str = "", mac: str = "", db: Session = Depends(get_db)):
-    """实时上网状态：时长、上下行速率、流量、套餐（前端每 3 秒轮询）。"""
+def api_live(request: Request, token: str = "", mac: str = "",
+             db: Session = Depends(get_db)):
+    """实时上网状态：必须带有效 token（URL 或 HttpOnly Cookie），
+    或带服务端签发的设备票据；不再仅凭 MAC 返回手机号/内网 IP/套餐。
+    """
+    # 上网 token 只从 HttpOnly Cookie/一次性票据获取，不再接受 URL 参数。
+    token = (request.cookies.get(TOKEN_COOKIE, "") or "").strip()
+    mac_q = device_auth.normalize_mac(mac)
     sess = None
     if token:
         sess = db.query(Sess).filter(Sess.token == token).order_by(Sess.id.desc()).first()
-    if sess is None and mac:
-        sess = db.query(Sess).filter(Sess.mac == mac.lower()).order_by(Sess.id.desc()).first()
+        if sess and (getattr(sess, "revoked", False) or svc.token_expired(sess)):
+            return JSONResponse({"ok": False, "msg": "会话已失效，请重新认证"}, status_code=401)
+    if sess is None and mac_q:
+        ticket = device_auth.verify_device_cookie(request.cookies.get(DEVICE_COOKIE, ""))
+        if not ticket or ticket[1] != mac_q:
+            return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
+        sess = (db.query(Sess)
+                .filter(Sess.user_id == ticket[0], Sess.mac == mac_q)
+                .order_by(Sess.id.desc()).first())
     if sess is None:
-        return JSONResponse({"ok": False, "msg": "会话不存在或已失效，请重新认证"})
+        return JSONResponse({"ok": False, "msg": "会话不存在或已失效，请重新认证"}, status_code=401)
+    if mac_q and (sess.mac or "").lower() != mac_q:
+        return JSONResponse({"ok": False, "msg": "设备与登录会话不一致"}, status_code=401)
 
     user = db.query(User).filter(User.id == sess.user_id).first()
-    sub = svc.get_active_subscription(db, user.id) if user else None
+    if not user or user.status != 1:
+        return JSONResponse({"ok": False, "msg": "账号不可用"}, status_code=401)
+    sub = svc.get_active_subscription(db, user.id)
     now = datetime.now()
     seconds = max(0, int((now - sess.start_at).total_seconds())) if sess.start_at else 0
-    cache_mac = sess.mac or (mac or "").lower()
+    cache_mac = sess.mac or mac_q
     st = realtime.get(cache_mac) if cache_mac else None
-    # 实时缓存只作短时补充；管理员踢线/退款后 revoked 必须立即压掉 LIVE
+    # 管理员踢线/退款/禁用后 revoked 必须立即压掉 LIVE
     effective_online = (not getattr(sess, "revoked", False)) and (
         svc.is_session_online(sess, now) or bool(st)
     )
-    # 账号维度：该用户名下当前在线的设备数（不是全网终端数）
     device_count = svc.online_device_count(db, user.id) if user else 0
     if device_count == 0 and effective_online:
         device_count = 1
@@ -684,12 +800,11 @@ def api_live(token: str = "", mac: str = "", db: Session = Depends(get_db)):
         elif remaining_seconds <= 300:
             reminder = "soon"
     elif sub is None and user is not None:
-        # 会话还在但套餐已经失效：明确告诉前端需要续费
         reminder = "expired"
 
     return JSONResponse({
         "ok": True,
-        "phone": (user.phone or "") if user else "",
+        "phone": _mask_phone(user.phone or ""),
         "mac": cache_mac,
         "ip": (st or {}).get("ip") or sess.ip,
         "seconds": seconds,
@@ -716,15 +831,17 @@ def api_live(token: str = "", mac: str = "", db: Session = Depends(get_db)):
 # ------------------------------------------------------------------ 在线状态
 @router.get("/me")
 def me(request: Request, token: str = "", db: Session = Depends(get_db)):
-    """查询当前账号的套餐余量。仅支持 token（P2-9：不再支持纯手机号查询）。"""
+    """查询当前账号的套餐余量；只接受有效 token/Cookie，不返回完整手机号。"""
+    # 上网 token 只从 HttpOnly Cookie/一次性票据获取，不再接受 URL 参数。
+    token = (request.cookies.get(TOKEN_COOKIE, "") or "").strip()
     if not token:
-        return JSONResponse({"ok": False, "msg": "未登录"})
+        return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
     sess = db.query(Sess).filter(Sess.token == token).first()
-    if not sess or not sess.user_id:
-        return JSONResponse({"ok": False, "msg": "未登录"})
-    user = db.query(User).filter(User.id == sess.user_id).first()
+    if not sess or not sess.user_id or getattr(sess, "revoked", False) or svc.token_expired(sess):
+        return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
+    user = db.query(User).filter(User.id == sess.user_id, User.status == 1).first()
     if not user:
-        return JSONResponse({"ok": False, "msg": "未登录"})
+        return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
 
     sub = svc.get_active_subscription(db, user.id)
     traffic_left_mb = None
@@ -732,7 +849,7 @@ def me(request: Request, token: str = "", db: Session = Depends(get_db)):
         traffic_left_mb = max(0, sub.traffic_total_mb - (sub.traffic_used_mb or 0))
     return JSONResponse({
         "ok": True,
-        "phone": user.phone,
+        "phone": _mask_phone(user.phone or ""),
         "nickname": user.display_name,
         "plan": sub.plan_name if sub else "",
         "expire_at": sub.expire_at.strftime("%Y-%m-%d %H:%M") if sub and sub.expire_at else "",
@@ -748,28 +865,46 @@ def success(request: Request, gw_id: str = "", token: str = "", rt: str = "", db
     支付宝同步返回使用 15 分钟一次性签名票据 rt，不把上网 token 传给支付宝；
     校验 rt 后为订单用户补签本地上网 token。
     """
+    # 上网 token 只从 HttpOnly Cookie/一次性票据获取，不再接受 URL 参数。
+    token = (request.cookies.get(TOKEN_COOKIE, "") or "").strip()
     if not token and rt:
         order_no = parse_signed_token(rt, "payreturn")
         if order_no:
             order = db.query(Order).filter(Order.order_no == order_no, Order.status == 1).first()
             if order:
-                user = db.query(User).filter(User.id == order.user_id).first()
+                user = db.query(User).filter(User.id == order.user_id, User.status == 1).first()
                 if user:
                     token = issue_token(db, user.id, "", "")
     sess = db.query(Sess).filter(Sess.token == token).first() if token else None
+    if sess and (getattr(sess, "revoked", False) or svc.token_expired(sess)):
+        sess = None
     user = db.query(User).filter(User.id == sess.user_id).first() if sess else None
+    if user and user.status != 1:
+        user = None
     sub = svc.get_active_subscription(db, user.id) if user else None
     online = svc.online_device_count(db, user.id) if user else 0
-    return templates.TemplateResponse(
+    response = templates.TemplateResponse(
         request=request,
         name="portal/success.html",
         context={
             "request": request, "gw_id": gw_id, "token": token,
             "session": sess, "user": user, "sub": sub, "online": int(online),
-            "user_phone": (user.phone or "") if user else "",
+            "user_phone": _mask_phone(user.phone or "") if user else "",
             "site_name": settings_store.get_site_name(db),
         },
     )
+    if token and sess:
+        response.set_cookie(
+            TOKEN_COOKIE, token, httponly=True, samesite="lax",
+            secure=COOKIE_SECURE, max_age=86400,
+        )
+        if sess.mac:
+            response.set_cookie(
+                DEVICE_COOKIE, device_auth.issue_device_cookie(user.id, sess.mac),
+                httponly=True, samesite="lax", secure=COOKIE_SECURE,
+                max_age=device_auth.DEVICE_COOKIE_TTL,
+            )
+    return response
 
 
 @router.get("/pay/success", response_class=HTMLResponse, include_in_schema=False)

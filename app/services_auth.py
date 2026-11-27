@@ -11,8 +11,8 @@ from .config import (
     SESSION_IDLE_TIMEOUT,
 )
 from .models import (
-    AuthLog, Device, IpWhitelist, MacBlacklist, MacWhitelist, Order, Plan, Session,
-    Subscription, User,
+    AdminAudit, AuthLog, Device, IpWhitelist, KickTask, MacBlacklist, MacWhitelist,
+    Order, Plan, Session, Subscription, SubscriptionOrder, User,
 )
 from . import settings_store
 
@@ -112,8 +112,27 @@ def _grant_free_trial(db, user: User, mac: str = ""):
                 user.id, plan.duration_minutes, plan.speed_limit_down, plan.device_limit)
 
 
+def _record_sub_order(db, sub: Subscription, plan: Plan, order_id: Optional[int]) -> None:
+    """记录订单对应的权益快照；同一订单重复开通时保持幂等。"""
+    if not order_id:
+        return
+    exists = db.query(SubscriptionOrder).filter(SubscriptionOrder.order_id == order_id).first()
+    if exists:
+        return
+    db.add(SubscriptionOrder(
+        order_id=order_id,
+        subscription_id=sub.id,
+        plan_id=plan.id,
+        granted_until=sub.expire_at,
+        granted_traffic_mb=sub.traffic_total_mb or 0,
+        granted_speed_up=sub.speed_limit_up or 0,
+        granted_speed_down=sub.speed_limit_down or 0,
+        granted_device_limit=sub.device_limit or 0,
+    ))
+
+
 def activate_subscription(db, user: User, plan: Plan, order_id: Optional[int] = None) -> Subscription:
-    """开通/续费套餐：同套餐未过期则到期时间叠加，流量额度重置为套餐值。"""
+    """开通/续费套餐：同套餐未过期叠加到期时间，并同步最新限速/设备数。"""
     now = datetime.now()
     start = now
     expire = None
@@ -132,10 +151,21 @@ def activate_subscription(db, user: User, plan: Plan, order_id: Optional[int] = 
         )
         if exist and exist.expire_at and exist.expire_at > now:
             exist.expire_at = exist.expire_at + (expire - now)
-            exist.traffic_total_mb = plan.traffic_mb or 0
+            if plan.traffic_mb and plan.traffic_mb > 0:
+                # 流量包续费：保留已用流量，新增额度叠加到“剩余额度”上，
+                # 不能把总额直接覆盖成新套餐额度（否则老用户续费会凭空少流量）。
+                remaining = max(0, int(exist.traffic_total_mb or 0) - int(exist.traffic_used_mb or 0))
+                exist.traffic_total_mb = remaining + int(plan.traffic_mb)
+            else:
+                exist.traffic_total_mb = 0
+            exist.plan_name = plan.name
+            exist.speed_limit_up = plan.speed_limit_up or 0
+            exist.speed_limit_down = plan.speed_limit_down or 0
+            exist.device_limit = max(0, int(plan.device_limit or 0))
             if exist.status != 1:
                 exist.status = 1
                 exist.traffic_used_mb = 0
+            _record_sub_order(db, exist, plan, order_id)
             db.commit()
             return exist
 
@@ -148,15 +178,33 @@ def activate_subscription(db, user: User, plan: Plan, order_id: Optional[int] = 
         expire_at=expire,
         traffic_total_mb=plan.traffic_mb,
         traffic_used_mb=0,
-        speed_limit_up=plan.speed_limit_up,
-        speed_limit_down=plan.speed_limit_down,
-        device_limit=plan.device_limit or settings_store.get_device_limit(db),
+        speed_limit_up=plan.speed_limit_up or 0,
+        speed_limit_down=plan.speed_limit_down or 0,
+        # 0 表示不限设备，不再用系统默认值覆盖套餐语义
+        device_limit=max(0, int(plan.device_limit or 0)),
         status=1,
     )
     db.add(sub)
+    db.flush()
+    _record_sub_order(db, sub, plan, order_id)
     db.commit()
     db.refresh(sub)
     return sub
+
+
+def sync_plan_subscriptions(db, plan: Plan) -> int:
+    """后台改套餐后，把限速/设备数/额度同步到该套餐所有生效订阅。"""
+    n = db.query(Subscription).filter(
+        Subscription.plan_id == plan.id, Subscription.status == 1
+    ).update({
+        "plan_name": plan.name,
+        "speed_limit_up": plan.speed_limit_up or 0,
+        "speed_limit_down": plan.speed_limit_down or 0,
+        "device_limit": max(0, int(plan.device_limit or 0)),
+        "traffic_total_mb": plan.traffic_mb or 0,
+    }, synchronize_session=False)
+    db.commit()
+    return int(n or 0)
 
 
 def get_active_subscription(db, user_id: int) -> Optional[Subscription]:
@@ -196,14 +244,24 @@ def is_session_online(sess: Session, now: Optional[datetime] = None) -> bool:
 def online_device_count(db, user_id: int, exclude_session_id: int = None, exclude_mac: str = "") -> int:
     """在线设备数；可排除正在判定的会话/同 MAC 旧会话，避免把自己算进配额。"""
     cutoff = datetime.now() - timedelta(seconds=ONLINE_WINDOW_SECONDS)
-    q = db.query(func.count(Session.id)).filter(
-        Session.user_id == user_id, Session.status == 1, Session.last_update_at >= cutoff
+    q = db.query(func.count(func.distinct(Session.mac))).filter(
+        Session.user_id == user_id, Session.status == 1,
+        Session.last_update_at >= cutoff, Session.mac != ""
     )
     if exclude_session_id:
         q = q.filter(Session.id != exclude_session_id)
     if exclude_mac:
         q = q.filter(Session.mac != (exclude_mac or "").lower())
     return q.scalar() or 0
+
+
+def gateway_active(db, gw_id: str) -> bool:
+    """网关是否在设备表中登记且启用；未知/禁用网关不得认证。"""
+    gid = (gw_id or "").strip()
+    if not gid:
+        return False
+    dev = db.query(Device).filter(Device.gw_id == gid).first()
+    return bool(dev and dev.status == 1)
 
 
 def check_access(db, user: User, exclude_session_id: int = None, exclude_mac: str = "") -> Tuple[bool, str, Optional[Subscription]]:
@@ -489,7 +547,7 @@ def cleanup_idle_sessions(db, timeout: int = SESSION_IDLE_TIMEOUT) -> int:
 def cleanup_expired_records(db) -> dict:
     """定期清理：离线会话记录、过期待支付订单。"""
     now = datetime.now()
-    ret = {"sessions": 0, "orders": 0}
+    ret = {"sessions": 0, "orders": 0, "kick_tasks": 0}
     # 1) 超过保留期的离线会话记录
     keep = now - timedelta(days=SESSION_RECORD_RETENTION_DAYS)
     ret["sessions"] = db.query(Session).filter(
@@ -499,6 +557,10 @@ def cleanup_expired_records(db) -> dict:
     ret["orders"] = db.query(Order).filter(
         Order.status == 0, Order.expire_at.isnot(None), Order.expire_at < now
     ).update({"status": 2}, synchronize_session=False)
+    # 3) 已完成踢线任务保留 7 天；失败任务保留 30 天便于排查。
+    ret["kick_tasks"] = db.query(KickTask).filter(
+        KickTask.status == "done", KickTask.done_at < now - timedelta(days=7)
+    ).delete(synchronize_session=False)
     db.commit()
     return ret
 
@@ -509,6 +571,7 @@ def create_order(db, user: User, plan: Plan) -> Order:
         user_id=user.id,
         plan_id=plan.id,
         plan_name=plan.name,
+        phone_snapshot=(user.phone or ""),
         amount=plan.price,
         status=0,
         expire_at=datetime.now() + timedelta(minutes=30),
@@ -520,18 +583,54 @@ def create_order(db, user: User, plan: Plan) -> Order:
 
 
 def pay_order_success(db, order: Order, pay_type: str = "mock", trade_no: str = ""):
-    """支付成功：置订单已完成并开通套餐（幂等）。"""
+    """支付成功：用原子条件更新抢占订单，再开通权益。
+
+    并发通知/后台查单同时到达时，只有一个请求能把 status 0 -> 1；
+    另一个请求看到更新 0 行后直接返回，不会重复叠加订阅。
+    """
     if order.status == 1:
-        return
+        # 已支付且已有权益账本：幂等成功；缺账本则补开一次（上次开通异常）。
+        if db.query(SubscriptionOrder).filter(SubscriptionOrder.order_id == order.id).first():
+            return True
+        plan = db.query(Plan).filter(Plan.id == order.plan_id).first()
+        user = db.query(User).filter(User.id == order.user_id).first()
+        # 兼容升级前的历史订单：旧版 Subscription.order_id 已指向该订单，
+        # 说明权益早已开通过，只补账本快照，不能再叠加一次时长/流量。
+        legacy = db.query(Subscription).filter(Subscription.order_id == order.id).first()
+        if legacy and plan:
+            _record_sub_order(db, legacy, plan, order.id)
+            db.commit()
+            return True
+        if plan and user:
+            activate_subscription(db, user, plan, order_id=order.id)
+            return True
+        return False
+    plan = db.query(Plan).filter(Plan.id == order.plan_id).first()
+    user = db.query(User).filter(User.id == order.user_id).first()
+    if not plan or not user:
+        # 套餐被删除或用户不存在：不要把订单标记为已支付，等待人工退款/补单。
+        logger.error("pay_order_success cannot activate order=%s plan=%s user=%s",
+                     order.id, order.plan_id, order.user_id)
+        return False
+    updated = db.query(Order).filter(
+        Order.id == order.id, Order.status == 0
+    ).update({
+        "status": 1,
+        "pay_type": pay_type,
+        "trade_no": trade_no or order.order_no,
+        "paid_at": datetime.now(),
+    }, synchronize_session=False)
+    if not updated:
+        db.rollback()
+        return False
+    paid_at = datetime.now()
     order.status = 1
     order.pay_type = pay_type
     order.trade_no = trade_no or order.order_no
-    order.paid_at = datetime.now()
-    plan = db.query(Plan).filter(Plan.id == order.plan_id).first()
-    user = db.query(User).filter(User.id == order.user_id).first()
-    if plan and user:
-        activate_subscription(db, user, plan, order_id=order.id)
+    order.paid_at = paid_at
     db.commit()
+    activate_subscription(db, user, plan, order_id=order.id)
+    return True
 
 
 def expire_subscriptions(db) -> dict:
@@ -618,11 +717,89 @@ def expire_subscriptions(db) -> dict:
         s.stop_at = now
         ret["sessions"] += 1
     db.commit()
+    if ret["targets"]:
+        enqueue_kick(db, ret["targets"], reason="expire_or_traffic")
     return ret
 
 
+def enqueue_kick(db, targets, reason: str = "", user_id: Optional[int] = None,
+                 session_id: Optional[int] = None) -> int:
+    """把 (mac, ip, gw_id) 目标写入持久化踢线队列，返回新增/更新数量。"""
+    n = 0
+    now = datetime.now()
+    for t in targets or []:
+        if isinstance(t, dict):
+            mac, ip, gw = t.get("mac"), t.get("ip"), t.get("gw_id")
+        else:
+            mac, ip, gw = (list(t) + ["", "", ""])[:3]
+        mac = (mac or "").strip().lower()
+        gw = (gw or "").strip()
+        if not mac:
+            continue
+        row = db.query(KickTask).filter(
+            KickTask.mac == mac, KickTask.gw_id == gw,
+            KickTask.status.in_(("pending", "processing")),
+        ).order_by(KickTask.id.desc()).first()
+        if row:
+            row.reason = reason or row.reason
+            row.ip = ip or row.ip
+            row.next_retry_at = now
+            n += 1
+            continue
+        db.add(KickTask(
+            user_id=user_id, session_id=session_id, mac=mac, ip=ip or "",
+            gw_id=gw, reason=reason or "", status="pending",
+            attempts=0, next_retry_at=now,
+        ))
+        n += 1
+    if n:
+        db.commit()
+    return n
+
+
+def pending_kick_tasks(db, limit: int = 20) -> list[KickTask]:
+    now = datetime.now()
+    return (
+        db.query(KickTask)
+        .filter(KickTask.status.in_(("pending", "processing")),
+                KickTask.next_retry_at <= now)
+        .order_by(KickTask.id.asc()).limit(limit).all()
+    )
+
+
+def claim_kick_task(db, task_id: int, worker: str = "") -> bool:
+    """原子抢占，避免多 worker 同时处理同一个 target。"""
+    n = db.query(KickTask).filter(
+        KickTask.id == task_id, KickTask.status.in_(("pending", "processing")),
+        KickTask.next_retry_at <= datetime.now()
+    ).update({
+        "status": "processing",
+        "attempts": KickTask.attempts + 1,
+        # 给处理中的任务 2 分钟超时窗口，worker 崩溃后可被重新领取。
+        "next_retry_at": datetime.now() + timedelta(seconds=120),
+    }, synchronize_session=False)
+    db.commit()
+    return bool(n)
+
+
+def finish_kick_task(db, task_id: int, ok: bool, error: str = "") -> None:
+    row = db.query(KickTask).filter(KickTask.id == task_id).first()
+    if not row:
+        return
+    if ok:
+        row.status = "done"
+        row.done_at = datetime.now()
+        row.last_error = ""
+    else:
+        row.last_error = (error or "")[:250]
+        # 先 5 秒，逐步退避到 5 分钟；不设上限，网关恢复后继续补踢。
+        row.next_retry_at = datetime.now() + timedelta(seconds=min(300, 5 * max(1, row.attempts)))
+        row.status = "pending" if row.attempts < 1000 else "failed"
+    db.commit()
+
+
 def refund_order(db, order: Order, reason: str = "", channel_refunded: bool = False):
-    """退款/退单：撤销订单并立即停用该订单开通的套餐。返回 (ok, msg)。"""
+    """退款/退单：按订单权益账本回滚，并保证断网目标进入重试队列。"""
     if order.status == 3:
         return False, "该订单已经退款，无需重复操作"
     if order.status != 1:
@@ -630,22 +807,80 @@ def refund_order(db, order: Order, reason: str = "", channel_refunded: bool = Fa
     if order.pay_type not in ("", "mock") and not channel_refunded:
         return False, "该订单为真实渠道支付，请先在支付宝/微信商户后台完成退款，再勾选“渠道已退款”登记"
 
-    subs = db.query(Subscription).filter(Subscription.order_id == order.id).all()
     stopped = 0
-    for sub in subs:
+    targets = []
+    touched_sub_ids = set()
+    links = db.query(SubscriptionOrder).filter(
+        SubscriptionOrder.order_id == order.id
+    ).order_by(SubscriptionOrder.id.asc()).all()
+    for link in links:
+        sub = db.query(Subscription).filter(Subscription.id == link.subscription_id).first()
+        if not sub:
+            continue
+        touched_sub_ids.add(sub.id)
+        later_active = False
+        for later in db.query(SubscriptionOrder).filter(
+            SubscriptionOrder.subscription_id == sub.id,
+            SubscriptionOrder.id > link.id,
+        ).order_by(SubscriptionOrder.id.asc()).all():
+            later_order = db.query(Order).filter(Order.id == later.order_id).first()
+            if later_order and later_order.status == 1:
+                later_active = True
+                break
+        if later_active:
+            # 后面还有未退款的续费订单：不能把整条订阅停掉。
+            continue
+        prev = db.query(SubscriptionOrder).filter(
+            SubscriptionOrder.subscription_id == sub.id,
+            SubscriptionOrder.id < link.id,
+        ).order_by(SubscriptionOrder.id.desc()).first()
+        if prev:
+            prev_order = db.query(Order).filter(Order.id == prev.order_id).first()
+            if prev_order and prev_order.status == 1:
+                sub.expire_at = prev.granted_until
+                sub.traffic_total_mb = prev.granted_traffic_mb or 0
+                sub.speed_limit_up = prev.granted_speed_up or 0
+                sub.speed_limit_down = prev.granted_speed_down or 0
+                sub.device_limit = prev.granted_device_limit or 0
+                if sub.expire_at and sub.expire_at <= datetime.now():
+                    sub.status = 2
+                elif sub.traffic_total_mb > 0 and (sub.traffic_used_mb or 0) >= sub.traffic_total_mb:
+                    sub.status = 3
+                else:
+                    sub.status = 1
+                stopped += 1
+                continue
         if sub.status == 1:
-            sub.status = 0          # 停用
+            sub.status = 0
             stopped += 1
 
-    # 退款立即断网：旧 token 不能靠 gwstats 重新变成在线
-    sessions = db.query(Session).filter(Session.user_id == order.user_id, Session.status == 1).all()
-    for s in sessions:
-        s.status = 0
-        s.stop_at = datetime.now()
-        s.revoked = True
+    # 兼容历史订单：没有 SubscriptionOrder 账本时仍按 Subscription.order_id 停用。
+    if not links:
+        for sub in db.query(Subscription).filter(Subscription.order_id == order.id).all():
+            touched_sub_ids.add(sub.id)
+            if sub.status == 1:
+                sub.status = 0
+                stopped += 1
+
+    # 只有用户名下已没有生效订阅时才断网；否则保留其他套餐的在线会话。
+    db.flush()
+    active_else = db.query(Subscription).filter(
+        Subscription.user_id == order.user_id, Subscription.status == 1
+    ).first() is not None
+    if not active_else:
+        sessions = db.query(Session).filter(Session.user_id == order.user_id).all()
+        for s in sessions:
+            if s.mac:
+                targets.append((s.mac, s.ip, s.gw_id))
+            if s.status == 1:
+                s.status = 0
+                s.stop_at = datetime.now()
+                s.revoked = True
+        enqueue_kick(db, targets, reason=f"refund:{order.order_no}", user_id=order.user_id)
 
     order.status = 3
     order.refund_at = datetime.now()
     order.refund_reason = (reason or "")[:250]
     db.commit()
-    return True, f"已退款，该订单开通的套餐已立即停用（影响 {stopped} 条订阅）"
+    suffix = "，已加入网关踢线重试队列" if targets else ""
+    return True, f"已退款，按订单权益回滚 {stopped} 条订阅{suffix}"

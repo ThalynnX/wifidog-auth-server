@@ -21,8 +21,8 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from app import device_auth
-from .. import alipay, services_auth as svc
-from ..config import ALIPAY_APPID, ALIPAY_SELLER_ID
+from .. import alipay, netutil, services_auth as svc
+from ..config import ALIPAY_APPID, ALIPAY_SELLER_ID, COOKIE_SECURE
 from ..database import get_db
 from ..models import AlipayOAuthState, Order, PaymentEvent, User, Session as Sess
 from .wifidog import issue_token, push_client_allow
@@ -31,8 +31,12 @@ logger = logging.getLogger("wifidog.alipay")
 router = APIRouter(prefix="/portal", tags=["alipay"])
 
 
+TOKEN_COOKIE = "wd_token"
+DEVICE_COOKIE = "wd_device"
+
+
 def _ip(request: Request) -> str:
-    return (request.headers.get("x-forwarded-for") or request.client.host or "").split(",")[0].strip()
+    return netutil.client_ip(request)
 
 
 def _valid_phone(phone: str) -> bool:
@@ -65,6 +69,10 @@ def oauth_start(
     """跳转支付宝授权页；state 落库一次性使用，10 分钟内有效。"""
     if not alipay.oauth_ready():
         return _html("支付宝登录未配置", "管理员尚未配置支付宝 APPID、应用私钥、平台公钥或授权回调地址。", 503)
+    if gw_id and not svc.gateway_active(db, gw_id):
+        return _html("网关不可用", "网关未登记或已停用，请联系管理员。", 403)
+    if mac and svc.is_mac_blacklisted(db, mac):
+        return _html("设备已禁用", "该设备已被管理员禁止上网。", 403)
     # 顺手清理过期 state，避免表无限增长
     db.query(AlipayOAuthState).filter(AlipayOAuthState.expire_at < datetime.now()).delete()
     db.commit()
@@ -163,6 +171,12 @@ async def oauth_callback(
 
     if user.status != 1:
         return _html("账号已禁用", "该账号已被管理员禁用，请联系客服。")
+    if gw_id and not svc.gateway_active(db, gw_id):
+        return _html("网关不可用", "网关未登记或已停用，请联系管理员。", 403)
+    if mac and svc.is_mac_blacklisted(db, mac):
+        svc.write_log(db, "login", "fail", user_id=user.id, phone=user.phone or "",
+                      gw_id=gw_id, ip=ip, mac=mac, reason="mac_blacklisted")
+        return _html("设备已禁用", "该设备已被管理员禁止上网。", 403)
 
     if mac:
         dev_ok, dev_code, dev_msg = device_auth.check_device(db, user, mac)
@@ -175,16 +189,17 @@ async def oauth_callback(
     user.last_login_ip = ip
     db.commit()
 
+    ok, reason, _sub = svc.check_access(db, user, exclude_mac=mac)
     token = issue_token(db, user.id, gw_id, mac)
     sess = db.query(Sess).filter(Sess.token == token).first()
-    if sess:
-        svc.mark_authenticated(db, sess, "login", user_id=user.id, phone=user.phone or "",
-                              gw_id=gw_id, mac=mac, ip=ip, reason="alipay_oauth")
-    ok, reason, _sub = svc.check_access(db, user, exclude_mac=mac)
     if ok and gw_id and mac:
         sent = 0
         try:
-            sent = await push_client_allow(mac, ip, gw_id, token)
+            sent = await push_client_allow(
+                mac, ip, gw_id, token,
+                down_kbps=(_sub.speed_limit_down if _sub else 0),
+                up_kbps=(_sub.speed_limit_up if _sub else 0),
+            )
         except Exception:  # noqa: BLE001
             logger.exception("支付宝登录推送 allow 失败")
         if sess and sent:
@@ -192,14 +207,30 @@ async def oauth_callback(
             sess.stop_at = None
             sess.last_update_at = datetime.now()
             db.commit()
-        return RedirectResponse(
-            f"/portal/success?gw_id={gw_id}&token={token}", status_code=302
-        )
+            svc.mark_authenticated(db, sess, "login", user_id=user.id, phone=user.phone or "",
+                                  gw_id=gw_id, mac=mac, ip=ip, reason="alipay_oauth")
+        if sent:
+            resp = RedirectResponse(f"/portal/success?gw_id={gw_id}", status_code=302)
+        else:
+            resp = RedirectResponse(f"/portal/success?gw_id={gw_id}&retry=1", status_code=302)
+        resp.set_cookie(TOKEN_COOKIE, token, httponly=True, samesite="lax",
+                        secure=COOKIE_SECURE, max_age=86400)
+        if mac:
+            resp.set_cookie(
+                DEVICE_COOKIE, device_auth.issue_device_cookie(user.id, mac),
+                httponly=True, samesite="lax", secure=COOKIE_SECURE,
+                max_age=device_auth.DEVICE_COOKIE_TTL,
+            )
+        return resp
 
     phone_q = user.phone or ""
-    return RedirectResponse(
-        f"/portal/plans?phone={phone_q}&token={token}", status_code=302
+    # 上网 token 不放在 URL（会进入浏览器历史/代理日志），改由 HttpOnly Cookie 携带。
+    resp = RedirectResponse(
+        f"/portal/plans?phone={phone_q}", status_code=302
     )
+    resp.set_cookie(TOKEN_COOKIE, token, httponly=True, samesite="lax",
+                    secure=COOKIE_SECURE, max_age=86400)
+    return resp
 
 
 @router.post("/api/alipay/gateway")

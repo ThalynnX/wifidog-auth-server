@@ -42,7 +42,7 @@
   const rate=(id,bar,value)=>{const n=Number(value)||0;$(id).innerHTML=n.toFixed(2)+'<small>Mbps</small>';$(bar).style.width=Math.min(100,n/20*100)+'%';};
   async function refresh(showError){
     if(polling)return;polling=true;
-    const r=await UI.api('/portal/api/live?token='+encodeURIComponent(token||get('wg_token'))+'&mac='+encodeURIComponent(mac),{silent:true});polling=false;
+    const r=await UI.api('/portal/api/live?mac='+encodeURIComponent(mac),{silent:true});polling=false;
     if(!r.ok){
       if(mac&&!recovered){
         recovered=true;
@@ -76,7 +76,7 @@
     if(showError)say('状态已更新','ok');
   }
   $('refreshBtn').onclick=async function(){if(this.dataset.busy==='1')return;UI.busy(this,true,'刷新中…');await refresh(true);UI.busy(this,false);};
-  $('plansBtn').onclick=()=>location.href='/portal/plans?phone='+encodeURIComponent(get('wg_phone'))+'&token='+encodeURIComponent(token||get('wg_token'));
+  $('plansBtn').onclick=()=>location.href='/portal/plans?phone='+encodeURIComponent(get('wg_phone'));
   $('switchAccountBtn').onclick=()=>{
     set('wg_token','');set('wg_phone','');
     const qs=new URLSearchParams();

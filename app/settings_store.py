@@ -77,11 +77,13 @@ def sms_provider(db) -> str:
     """短信通道由运行模式决定：test 一律 mock；production 用配置的真实通道。"""
     if is_test_mode(db):
         return "mock"
-    return config.SMS_PROVIDER if config.sms_ready() else "mock"
+    # 生产模式未配置真实通道时 fail-closed，绝不能退回 mock 自动显示验证码。
+    return config.SMS_PROVIDER if config.sms_ready() else ""
 
 
 def pay_provider(db) -> str:
     """支付渠道由运行模式决定：test 一律 mock；production 用配置的真实通道。"""
     if is_test_mode(db):
         return "mock"
-    return config.PAY_PROVIDER if config.pay_ready() else "mock"
+    # 生产模式未配置真实支付通道时 fail-closed，绝不能退回 mock 白嫖。
+    return config.PAY_PROVIDER if config.pay_ready() else ""

@@ -172,17 +172,12 @@ class UserDeviceControlTest(unittest.TestCase):
         self.assertTrue(r.json()["ok"], r.text)
         self.assertEqual(r.json()["mac"], "00:11:22:33:44:55")
 
-    def test_delete_requires_confirm_and_keeps_orders(self) -> None:
-        r = self.client.post(f"/admin/api/users/{self.uid}/delete", json={"confirm": "wrong"})
-        self.assertFalse(r.json()["ok"], r.text)
-
-        r = self.client.post(f"/admin/api/users/{self.uid}/delete", json={"confirm": "13900001111"})
-        self.assertFalse(r.json()["ok"], r.text)
-        self.assertTrue(r.json()["need_force"])
-
-        r = self.client.post(f"/admin/api/users/{self.uid}/delete", json={"confirm": "13900001111", "force": True})
+    def test_delete_keeps_orders_and_queues_kick(self) -> None:
+        # 后台删除由前端二次确认弹窗承担；接口按当前产品约定直接执行。
+        r = self.client.post(f"/admin/api/users/{self.uid}/delete", json={})
         self.assertTrue(r.json()["ok"], r.text)
         self.assertGreaterEqual(r.json()["kept_orders"], 1)
+        self.assertGreaterEqual(r.json()["kick_targets"], 1)
 
         db = SessionLocal()
         try:

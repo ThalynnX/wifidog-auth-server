@@ -8,12 +8,12 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from .. import alipay, device_auth, ratelimit, redis_bus as ws_bus, services_auth as svc, settings_store
-from ..config import ADMIN_TOKEN_EXPIRE, DEVICE_OFFLINE_TIMEOUT, ONLINE_WINDOW_SECONDS
+from .. import alipay, device_auth, netutil, ratelimit, redis_bus as ws_bus, services_auth as svc, settings_store
+from ..config import ADMIN_TOKEN_EXPIRE, COOKIE_SECURE, DEVICE_OFFLINE_TIMEOUT, ONLINE_WINDOW_SECONDS
 from ..database import get_db
 from ..models import (
-    Admin, AuthLog, Device, IpWhitelist, MacBlacklist, MacWhitelist, Order, Plan,
-    Session as Sess, Setting, SmsCode, Subscription, User,
+    Admin, AdminAudit, AuthLog, Device, IpWhitelist, MacBlacklist, MacWhitelist, Order,
+    Plan, Session as Sess, Setting, SmsCode, Subscription, User,
 )
 from ..security import hash_password, make_signed_token, parse_signed_token, verify_password
 from ..templates_env import templates
@@ -26,14 +26,32 @@ _MAC_RE = re.compile(r"^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$")
 
 
 # ------------------------------------------------------------------ 鉴权
+def audit(db: Session, request: Request, adm: Admin, action: str,
+          target_type: str = "", target_id: str = "", detail: str = "") -> None:
+    try:
+        db.add(AdminAudit(
+            admin_id=adm.id, username=adm.username, action=action,
+            target_type=target_type, target_id=str(target_id or ""),
+            detail=(detail or "")[:2000], ip=netutil.client_ip(request),
+        ))
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
 def current_admin(request: Request, db: Session = Depends(get_db)) -> Admin:
     token = request.cookies.get("admin_token") or request.headers.get("x-admin-token") or ""
-    username = parse_signed_token(token, "admin")
-    if not username:
+    subject = parse_signed_token(token, "admin")
+    if not subject or ":" not in subject:
         raise HTTPException(status_code=401, detail="未登录")
+    username, _, ver = subject.rpartition(":")
+    try:
+        version = int(ver)
+    except ValueError:
+        raise HTTPException(status_code=401, detail="登录已失效，请重新登录")
     adm = db.query(Admin).filter(Admin.username == username, Admin.status == 1).first()
-    if not adm:
-        raise HTTPException(status_code=401, detail="账号不可用")
+    if not adm or int(getattr(adm, "token_version", 0) or 0) != version:
+        raise HTTPException(status_code=401, detail="账号不可用或登录已失效")
     return adm
 
 
@@ -55,12 +73,12 @@ def login_page(request: Request):
 
 @router.post("/api/login")
 def login(data: LoginIn, request: Request, db: Session = Depends(get_db)):
-    ip = request.client.host if request.client else ""
+    ip = netutil.client_ip(request)
     lock_key = f"admlogin:{ip}"
     if ratelimit.blocked(lock_key, _LOGIN_LOCK[0], _LOGIN_LOCK[1]):
         return JSONResponse({"ok": False, "msg": "失败次数过多，请10分钟后再试"}, status_code=429)
 
-    adm = db.query(Admin).filter(Admin.username == data.username).first()
+    adm = db.query(Admin).filter(Admin.username == data.username, Admin.status == 1).first()
     if not adm or not verify_password(data.password, adm.password_hash):
         ratelimit.check(lock_key, _LOGIN_LOCK[0] * 10, _LOGIN_LOCK[1])  # 记录失败
         return JSONResponse({"ok": False, "msg": "用户名或密码错误"})
@@ -69,9 +87,15 @@ def login(data: LoginIn, request: Request, db: Session = Depends(get_db)):
     adm.last_login_at = datetime.now()
     adm.last_login_ip = ip
     db.commit()
-    token = make_signed_token("admin", adm.username, ADMIN_TOKEN_EXPIRE)
+    token = make_signed_token(
+        "admin", f"{adm.username}:{int(adm.token_version or 0)}", ADMIN_TOKEN_EXPIRE
+    )
     resp = JSONResponse({"ok": True})
-    resp.set_cookie("admin_token", token, httponly=True, samesite="lax", max_age=ADMIN_TOKEN_EXPIRE)
+    resp.set_cookie(
+        "admin_token", token, httponly=True, samesite="lax",
+        secure=COOKIE_SECURE, max_age=ADMIN_TOKEN_EXPIRE,
+    )
+    audit(db, request, adm, "login", "admin", adm.id, f"ip={ip}")
     return resp
 
 
@@ -387,16 +411,15 @@ class UserDeleteIn(BaseModel):
 @router.post("/api/users/{uid}/delete")
 async def user_delete(uid: int, data: UserDeleteIn, request: Request, db: Session = Depends(get_db)):
     """删除用户账号：停会话、解绑设备、清订阅/验证码，保留订单做财务审计。"""
-    current_admin(request, db)
+    adm = current_admin(request, db)
     u = db.query(User).filter(User.id == uid).first()
     if not u:
         return {"ok": False, "msg": "用户不存在"}
 
-    # 删除前只需前端二次确认；不再要求输入手机号/用户名/ID，也不再额外要求强制勾选。
-    # 生效套餐会随账号一并清理，历史订单仍保留用于财务审计。
-
     active = db.query(Sess).filter(Sess.user_id == uid).all()
-    targets = [(s.mac, s.ip, s.gw_id) for s in active if s.mac and s.status == 1]
+    targets = [(s.mac, s.ip, s.gw_id) for s in active if s.mac]
+    # 先落队列再删用户：即使网关当前离线，worker 也会在网关恢复后重试踢线。
+    svc.enqueue_kick(db, targets, reason=f"user_delete:{uid}", user_id=uid)
 
     order_count = db.query(func.count(Order.id)).filter(Order.user_id == uid).scalar() or 0
     sub_count = db.query(func.count(Subscription.id)).filter(Subscription.user_id == uid).scalar() or 0
@@ -407,37 +430,43 @@ async def user_delete(uid: int, data: UserDeleteIn, request: Request, db: Sessio
         db.query(SmsCode).filter(SmsCode.phone == u.phone).delete(synchronize_session=False)
     db.delete(u)
     db.commit()
-    for m, ip, gw in targets:
-        try:
-            await wd.push_client_deny(m, ip, gw)
-        except Exception:  # noqa: BLE001
-            pass
+    audit(db, request, adm, "user_delete", "user", uid,
+          f"orders={order_count} subs={sub_count} sessions={len(active)} kick_targets={len(targets)}")
 
     return {
         "ok": True,
-        "msg": f"用户已删除；保留 {order_count} 笔历史订单用于审计",
+        "msg": f"用户已删除并已加入踢线队列；保留 {order_count} 笔历史订单用于审计",
         "deleted_subscriptions": sub_count,
         "deleted_sessions": len(active),
         "deleted_sms_codes": sms_count or 0,
         "kept_orders": order_count,
+        "kick_targets": len(targets),
     }
 
 
 @router.post("/api/users/{uid}/toggle")
 def user_toggle(uid: int, request: Request, db: Session = Depends(get_db)):
-    current_admin(request, db)
+    adm = current_admin(request, db)
     u = db.query(User).filter(User.id == uid).first()
     if not u:
         return {"ok": False, "msg": "用户不存在"}
     u.status = 0 if u.status == 1 else 1
     db.commit()
-    if u.status == 0:  # 禁用时踢下线
-        for s in db.query(Sess).filter(Sess.user_id == uid, Sess.status == 1).all():
-            s.status = 0
-            s.stop_at = datetime.now()
-            s.revoked = True
+    kicked = 0
+    if u.status == 0:  # 禁用时立即下线并持久化踢线
+        targets = []
+        for s in db.query(Sess).filter(Sess.user_id == uid).all():
+            if s.mac:
+                targets.append((s.mac, s.ip, s.gw_id))
+            if s.status == 1:
+                s.status = 0
+                s.stop_at = datetime.now()
+                s.revoked = True
+                kicked += 1
         db.commit()
-    return {"ok": True, "status": u.status}
+        svc.enqueue_kick(db, targets, reason=f"user_toggle:{uid}", user_id=uid)
+    audit(db, request, adm, "user_toggle", "user", uid, f"status={u.status} kicked={kicked}")
+    return {"ok": True, "status": u.status, "kicked": kicked}
 
 
 # ------------------------------------------------------------------ 设备管理
@@ -453,6 +482,7 @@ def devices(request: Request, db: Session = Depends(get_db)):
         "online": 1 if (d.online == 1 and d.status == 1 and d.last_seen_at and d.last_seen_at >= cutoff) else 0,
         "last_seen_at": d.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if d.last_seen_at else "",
         "last_ip": d.last_ip, "sys_load": d.sys_load, "remark": d.remark,
+        "secret_masked": ("***" + d.secret[-4:]) if d.secret else "",
     } for d in rows]}
 
 
@@ -462,11 +492,12 @@ class DeviceIn(BaseModel):
     location: str = ""
     remark: str = ""
     status: int = 1
+    secret: str = ""   # 可选：网关 WS 共享密钥；不填则保留原值
 
 
 @router.post("/api/devices")
 def device_save(data: DeviceIn, request: Request, db: Session = Depends(get_db)):
-    current_admin(request, db)
+    adm = current_admin(request, db)
     if not re.match(r"^[A-Za-z0-9_\-.]{1,64}$", data.gw_id):
         return {"ok": False, "msg": "网关 ID 仅允许字母/数字/._- 且不超过 64 字符"}
     d = db.query(Device).filter(Device.gw_id == data.gw_id).first()
@@ -477,18 +508,41 @@ def device_save(data: DeviceIn, request: Request, db: Session = Depends(get_db))
     d.location = data.location
     d.remark = data.remark
     d.status = data.status
+    if data.secret:
+        d.secret = data.secret.strip()[:128]
     db.commit()
+    if d.status == 0:
+        targets = [(x.mac, x.ip, x.gw_id) for x in
+                   db.query(Sess).filter(Sess.gw_id == d.gw_id).all()]
+        for x in db.query(Sess).filter(Sess.gw_id == d.gw_id, Sess.status == 1).all():
+            x.status = 0
+            x.stop_at = datetime.now()
+            x.revoked = True
+        db.commit()
+        svc.enqueue_kick(db, targets, reason=f"device_disable:{d.gw_id}")
+    audit(db, request, adm, "device_save", "device", d.gw_id,
+          f"status={d.status} secret_set={bool(d.secret)}")
     return {"ok": True, "id": d.id}
 
 
 @router.delete("/api/devices/{did}")
 def device_del(did: int, request: Request, db: Session = Depends(get_db)):
-    current_admin(request, db)
+    adm = current_admin(request, db)
     d = db.query(Device).filter(Device.id == did).first()
-    if d:
-        db.delete(d)
-        db.commit()
-    return {"ok": True}
+    if not d:
+        return {"ok": True}
+    gw = d.gw_id
+    targets = [(x.mac, x.ip, x.gw_id) for x in
+               db.query(Sess).filter(Sess.gw_id == gw).all()]
+    for x in db.query(Sess).filter(Sess.gw_id == gw, Sess.status == 1).all():
+        x.status = 0
+        x.stop_at = datetime.now()
+        x.revoked = True
+    db.delete(d)
+    db.commit()
+    svc.enqueue_kick(db, targets, reason=f"device_del:{gw}")
+    audit(db, request, adm, "device_del", "device", gw, f"kick_targets={len(targets)}")
+    return {"ok": True, "kick_targets": len(targets)}
 
 
 # ------------------------------------------------------------------ 套餐管理
@@ -523,10 +577,11 @@ class PlanIn(BaseModel):
 
 @router.post("/api/plans")
 def plan_save(data: PlanIn, request: Request, db: Session = Depends(get_db)):
-    current_admin(request, db)
+    adm = current_admin(request, db)
     if data.type not in ("time", "flow", "period", "free"):
         return {"ok": False, "msg": "无效的套餐类型"}
-    if data.price < 0 or min(data.duration_minutes, data.traffic_mb, data.valid_days) < 0:
+    if data.price < 0 or min(data.duration_minutes, data.traffic_mb, data.valid_days,
+                            data.device_limit, data.speed_limit_up, data.speed_limit_down) < 0:
         return {"ok": False, "msg": "参数不能为负数"}
     if data.id:
         p = db.query(Plan).filter(Plan.id == data.id).first()
@@ -538,12 +593,16 @@ def plan_save(data: PlanIn, request: Request, db: Session = Depends(get_db)):
     for k, v in data.dict(exclude={"id"}).items():
         setattr(p, k, v)
     db.commit()
-    return {"ok": True, "id": p.id}
+    # 已生效订阅同步限速/设备数/额度，避免“后台改了配置但用户仍按旧值”。
+    synced = svc.sync_plan_subscriptions(db, p)
+    audit(db, request, adm, "plan_save", "plan", p.id,
+          f"name={p.name} device={p.device_limit} speed={p.speed_limit_up}/{p.speed_limit_down} synced={synced}")
+    return {"ok": True, "id": p.id, "synced_subscriptions": synced}
 
 
 @router.delete("/api/plans/{pid}")
 def plan_del(pid: int, request: Request, db: Session = Depends(get_db)):
-    current_admin(request, db)
+    adm = current_admin(request, db)
     p = db.query(Plan).filter(Plan.id == pid).first()
     if not p:
         return {"ok": True}
@@ -556,8 +615,15 @@ def plan_del(pid: int, request: Request, db: Session = Depends(get_db)):
     ).scalar() or 0
     if in_use:
         return {"ok": False, "msg": f"该套餐有 {in_use} 个生效中的订阅，请先等订阅过期或下架"}
+    pending = db.query(func.count(Order.id)).filter(
+        Order.plan_id == pid, Order.status == 0
+    ).scalar() or 0
+    if pending:
+        return {"ok": False, "msg": f"该套餐有 {pending} 笔待支付订单，请先关闭/处理这些订单"}
+    name = p.name
     db.delete(p)
     db.commit()
+    audit(db, request, adm, "plan_del", "plan", pid, name)
     return {"ok": True}
 
 
@@ -580,7 +646,7 @@ def orders(request: Request, page: int = 1, size: int = 20, status: int = -1, db
     return {"ok": True, "total": total, "rows": [{
         "id": o.id, "order_no": o.order_no, "plan_name": o.plan_name,
         "amount": o.amount, "status": o.status, "pay_type": o.pay_type,
-        "phone": umap[o.user_id].phone if o.user_id in umap else "",
+        "phone": (umap[o.user_id].phone if o.user_id in umap else (o.phone_snapshot or "")),
         "created_at": o.created_at.strftime("%Y-%m-%d %H:%M"),
         "paid_at": o.paid_at.strftime("%Y-%m-%d %H:%M") if o.paid_at else "",
         "refund_at": o.refund_at.strftime("%Y-%m-%d %H:%M") if o.refund_at else "",
@@ -622,6 +688,8 @@ def order_refund(oid: int, data: RefundIn, request: Request, db: Session = Depen
     if ok:
         svc.write_log(db, "refund", "ok", user_id=order.user_id,
                       reason=f"{order.order_no} {data.reason} by {adm.username}"[:250])
+    audit(db, request, adm, "order_refund", "order", order.id,
+          f"ok={ok} order={order.order_no} reason={data.reason}")
     return {"ok": ok, "msg": msg}
 
 
@@ -649,7 +717,7 @@ def sessions(request: Request, db: Session = Depends(get_db)):
 @router.post("/api/sessions/{sid}/kick")
 async def kick(sid: int, request: Request, db: Session = Depends(get_db)):
     """踢下线。body {"block": true} 时同时把该 MAC 加入黑名单（对免认证网段同样有效）。"""
-    current_admin(request, db)
+    adm = current_admin(request, db)
     try:
         data = await request.json()
     except Exception:  # noqa: BLE001
@@ -664,12 +732,10 @@ async def kick(sid: int, request: Request, db: Session = Depends(get_db)):
     s.revoked = True
     db.commit()
 
-    # 立即通知网关删除该客户端授权；只改数据库会等下一次 counters 才断开。
+    # 只落队列，由 worker 带确认/重试地下发；单次 push 失败不会漏踢。
     if s.mac:
-        try:
-            await wd.push_client_deny(s.mac, s.ip, s.gw_id)
-        except Exception:  # noqa: BLE001
-            pass
+        svc.enqueue_kick(db, [(s.mac, s.ip, s.gw_id)],
+                         reason=f"session_kick:{sid}", user_id=s.user_id, session_id=s.id)
     msg = "已踢下线"
     if block:
         if s.mac:
@@ -679,6 +745,7 @@ async def kick(sid: int, request: Request, db: Session = Depends(get_db)):
                 msg = "已踢下线（该 MAC 已在黑名单中）"
         else:
             msg = "已踢下线（该会话没有 MAC，无法拉黑）"
+    audit(db, request, adm, "session_kick", "session", sid, f"block={block} mac={s.mac}")
     return {"ok": True, "msg": msg}
 
 
@@ -698,22 +765,19 @@ def blacklist(request: Request, db: Session = Depends(get_db)):
 
 @router.post("/api/blacklist")
 async def blacklist_add(data: MacIn, request: Request, db: Session = Depends(get_db)):
-    current_admin(request, db)
+    adm = current_admin(request, db)
     mac = data.mac.strip().lower().replace("-", ":")
     if not _MAC_RE.match(mac):
         return {"ok": False, "msg": "MAC 格式错误，应为 00:11:22:33:44:55"}
     if not svc.blacklist_mac(db, mac, note=data.note):
         return {"ok": False, "msg": "该 MAC 已在黑名单中"}
-    # 拉黑立即生效：数据库会话下线 + 网关即时 del_auth_client
-    old = db.query(Sess).filter(Sess.mac == mac, Sess.status == 1).order_by(Sess.id.desc()).first()
-    ip = old.ip if old else ""
-    gw = old.gw_id if old else ""
+    # 拉黑立即生效：数据库会话下线 + 网关踢线队列
+    targets = [(x.mac, x.ip, x.gw_id) for x in
+               db.query(Sess).filter(Sess.mac == mac).order_by(Sess.id.desc()).all()]
     svc.close_sessions_for_mac(db, mac)
-    try:
-        await wd.push_client_deny(mac, ip, gw)
-    except Exception:  # noqa: BLE001
-        pass
-    return {"ok": True}
+    svc.enqueue_kick(db, targets, reason=f"blacklist:{mac}")
+    audit(db, request, adm, "blacklist_add", "mac", mac, data.note)
+    return {"ok": True, "kick_targets": len(targets)}
 
 
 @router.delete("/api/blacklist/{bid}")
@@ -749,12 +813,19 @@ def whitelist_add(data: MacIn, request: Request, db: Session = Depends(get_db)):
 
 @router.delete("/api/whitelist/{wid}")
 def whitelist_del(wid: int, request: Request, db: Session = Depends(get_db)):
-    current_admin(request, db)
+    adm = current_admin(request, db)
     w = db.query(MacWhitelist).filter(MacWhitelist.id == wid).first()
-    if w:
-        db.delete(w)
-        db.commit()
-    return {"ok": True}
+    if not w:
+        return {"ok": True}
+    mac = (w.mac or "").lower()
+    db.delete(w)
+    db.commit()
+    targets = [(x.mac, x.ip, x.gw_id) for x in
+               db.query(Sess).filter(Sess.mac == mac).all()]
+    svc.close_sessions_for_mac(db, mac)
+    svc.enqueue_kick(db, targets, reason=f"whitelist_del:{mac}")
+    audit(db, request, adm, "whitelist_del", "mac", mac)
+    return {"ok": True, "kick_targets": len(targets)}
 
 
 # ------------------------------------------------------------------ IP 免认证白名单（单 IP / CIDR 网段，可用于有线网段整体放行）
@@ -799,12 +870,54 @@ def ip_whitelist_add(data: IpIn, request: Request, db: Session = Depends(get_db)
 
 @router.delete("/api/ipwhitelist/{wid}")
 def ip_whitelist_del(wid: int, request: Request, db: Session = Depends(get_db)):
-    current_admin(request, db)
+    import ipaddress
+
+    adm = current_admin(request, db)
     w = db.query(IpWhitelist).filter(IpWhitelist.id == wid).first()
-    if w:
-        db.delete(w)
-        db.commit()
-    return {"ok": True}
+    if not w:
+        return {"ok": True}
+    cidr = w.cidr
+    db.delete(w)
+    db.commit()
+    try:
+        net = ipaddress.ip_network(cidr, strict=False)
+    except ValueError:
+        net = None
+    targets = []
+    for x in db.query(Sess).all():
+        if not x.ip:
+            continue
+        try:
+            matched = bool(net and ipaddress.ip_address(x.ip.split("%")[0]) in net)
+        except ValueError:
+            matched = False
+        if matched:
+            targets.append((x.mac, x.ip, x.gw_id))
+            if x.status == 1:
+                x.status = 0
+                x.stop_at = datetime.now()
+                x.revoked = True
+    db.commit()
+    svc.enqueue_kick(db, targets, reason=f"ip_whitelist_del:{cidr}")
+    audit(db, request, adm, "ip_whitelist_del", "cidr", cidr, f"kick_targets={len(targets)}")
+    return {"ok": True, "kick_targets": len(targets)}
+
+
+# ------------------------------------------------------------------ 管理员操作审计
+@router.get("/api/audits")
+def audits(request: Request, page: int = 1, size: int = 30, db: Session = Depends(get_db)):
+    adm = current_admin(request, db)
+    page = max(1, page)
+    size = min(100, max(1, size))
+    q = db.query(AdminAudit)
+    total = q.count()
+    rows = q.order_by(AdminAudit.id.desc()).offset((page - 1) * size).limit(size).all()
+    return {"ok": True, "total": total, "rows": [{
+        "id": a.id, "username": a.username, "action": a.action,
+        "target_type": a.target_type, "target_id": a.target_id,
+        "detail": a.detail, "ip": a.ip,
+        "created_at": a.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+    } for a in rows]}
 
 
 # ------------------------------------------------------------------ 认证日志
@@ -861,7 +974,7 @@ class SettingsIn(BaseModel):
 
 @router.post("/api/settings")
 def save_settings(data: SettingsIn, request: Request, db: Session = Depends(get_db)):
-    current_admin(request, db)
+    adm = current_admin(request, db)
     if data.run_mode is not None:
         if data.run_mode not in ("test", "production"):
             return {"ok": False, "msg": "运行模式只能是 test 或 production"}
@@ -878,12 +991,15 @@ def save_settings(data: SettingsIn, request: Request, db: Session = Depends(get_
         settings_store.set_setting(db, "site_notice", data.site_notice[:500])
     if data.site_name is not None:
         settings_store.set_setting(db, "site_name", data.site_name[:64])
+    audit(db, request, adm, "settings_save", "settings", "",
+          f"run_mode={data.run_mode} free={data.free_trial_minutes} "
+          f"device={data.default_device_limit} site={data.site_name}")
     return {"ok": True}
 
 
 @router.post("/api/admin/password")
 async def change_password(request: Request, db: Session = Depends(get_db)):
-    """管理员修改自己的密码。"""
+    """管理员修改自己的密码，并使所有旧 token 立即失效。"""
     adm = current_admin(request, db)
     try:
         data = await request.json()
@@ -895,8 +1011,18 @@ async def change_password(request: Request, db: Session = Depends(get_db)):
     if len(new) < 8:
         return {"ok": False, "msg": "新密码至少 8 位"}
     adm.password_hash = hash_password(new)
+    adm.token_version = int(adm.token_version or 0) + 1
     db.commit()
-    return {"ok": True}
+    token = make_signed_token(
+        "admin", f"{adm.username}:{int(adm.token_version or 0)}", ADMIN_TOKEN_EXPIRE
+    )
+    resp = JSONResponse({"ok": True, "msg": "密码已修改，其他设备登录已失效"})
+    resp.set_cookie(
+        "admin_token", token, httponly=True, samesite="lax",
+        secure=COOKIE_SECURE, max_age=ADMIN_TOKEN_EXPIRE,
+    )
+    audit(db, request, adm, "password_change", "admin", adm.id)
+    return resp
 
 
 @router.get("/api/me")
@@ -913,7 +1039,7 @@ class SubscribeIn(BaseModel):
 @router.post("/api/users/{uid}/subscribe")
 def user_subscribe(uid: int, data: SubscribeIn, request: Request, db: Session = Depends(get_db)):
     """管理员手动给用户开通套餐/会员。"""
-    current_admin(request, db)
+    adm = current_admin(request, db)
     
     u = db.query(User).filter(User.id == uid).first()
     if not u:
@@ -925,6 +1051,6 @@ def user_subscribe(uid: int, data: SubscribeIn, request: Request, db: Session = 
     
     # 调用现有的激活订阅函数
     sub = svc.activate_subscription(db, u, p, order_id=None)
-    
-    return {"ok": True, "msg": f"已给用户 {u.display_name} 开通套餐「{p.name}」", 
+    audit(db, request, adm, "user_subscribe", "user", uid, f"plan={p.id} {p.name}")
+    return {"ok": True, "msg": f"已给用户 {u.display_name} 开通套餐「{p.name}」",
             "expire_at": sub.expire_at.strftime("%Y-%m-%d %H:%M") if sub.expire_at else "长期有效"}

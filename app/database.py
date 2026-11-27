@@ -52,10 +52,17 @@ def _migrate():
             "device_change_window_start": "DATETIME",
         },
         "orders": {
+            "phone_snapshot": "VARCHAR(20) DEFAULT ''",
             "refund_no": "VARCHAR(64) DEFAULT ''",
             "notify_id": "VARCHAR(128) DEFAULT ''",
             "alipay_trade_status": "VARCHAR(32) DEFAULT ''",
             "last_query_at": "DATETIME",
+        },
+        "admins": {
+            "token_version": "INTEGER NOT NULL DEFAULT 0",
+        },
+        "devices": {
+            "secret": "VARCHAR(128) DEFAULT ''",
         },
         "sessions": {
             "down_mbps": "FLOAT DEFAULT 0",

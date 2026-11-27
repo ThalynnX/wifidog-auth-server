@@ -3,6 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     BigInteger, Boolean, Column, DateTime, Float, Index, Integer, String, Text,
+    UniqueConstraint,
 )
 
 from .database import Base
@@ -109,6 +110,7 @@ class Order(Base, TimestampMixin):
     user_id = Column(Integer, nullable=False)
     plan_id = Column(Integer, nullable=False)
     plan_name = Column(String(128), default="")
+    phone_snapshot = Column(String(20), default="")  # 下单时手机号快照，用户删除后仍可对账
     amount = Column(Integer, default=0, nullable=False)  # 金额(分)
 
     status = Column(Integer, default=0, nullable=False)  # 0待支付 1已支付 2已关闭 3已退款
@@ -218,6 +220,7 @@ class Admin(Base, TimestampMixin):
     password_hash = Column(String(255), nullable=False)
     role = Column(String(20), default="admin")   # admin/operator
     status = Column(Integer, default=1, nullable=False)
+    token_version = Column(Integer, default=0, nullable=False)  # 改密/强制失效旧 token
     last_login_at = Column(DateTime, nullable=True)
     last_login_ip = Column(String(64), default="")
 
@@ -285,3 +288,69 @@ class PaymentEvent(Base, TimestampMixin):
     payload = Column(Text, default="")
     status = Column(String(32), default="received")
     note = Column(String(255), default="")
+
+
+# ------------------------------------------------------------------ 订阅-订单权益账本
+class SubscriptionOrder(Base, TimestampMixin):
+    """一张订单对应的权益快照。
+
+    同一套餐续费会复用 Subscription，但每次支付都必须留下一条记录，
+    退款时才能按订单回算到期时间/流量，而不是只按 Subscription.order_id 查找。
+    """
+    __tablename__ = "subscription_orders"
+    __table_args__ = (
+        UniqueConstraint("order_id", name="ux_sub_order_order"),
+        Index("ix_sub_order_sub", "subscription_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, nullable=False)
+    subscription_id = Column(Integer, nullable=False, index=True)
+    plan_id = Column(Integer, nullable=False)
+    granted_until = Column(DateTime, nullable=True)
+    granted_traffic_mb = Column(Integer, default=0)
+    granted_speed_up = Column(Integer, default=0)
+    granted_speed_down = Column(Integer, default=0)
+    granted_device_limit = Column(Integer, default=0)
+
+
+# ------------------------------------------------------------------ 网关踢线任务（持久化重试）
+class KickTask(Base, TimestampMixin):
+    """需要网关执行的踢线下发任务。
+
+    push_client_deny 只发一次且异常被吞掉时，网关离线/客户端 id 查不到就会漏踢。
+    这里把 target 落库，worker 按退避重试，网关重连后继续执行，直到收到确认。
+    """
+    __tablename__ = "kick_tasks"
+    __table_args__ = (
+        Index("ix_kick_status", "status"),
+        Index("ix_kick_next", "next_retry_at"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, nullable=True, index=True)
+    session_id = Column(Integer, nullable=True, index=True)
+    mac = Column(String(32), default="", index=True)
+    ip = Column(String(64), default="")
+    gw_id = Column(String(64), default="", index=True)
+    reason = Column(String(64), default="")
+    status = Column(String(16), default="pending", nullable=False)  # pending/processing/done/failed
+    attempts = Column(Integer, default=0, nullable=False)
+    last_error = Column(String(255), default="")
+    next_retry_at = Column(DateTime, default=_now, nullable=False)
+    done_at = Column(DateTime, nullable=True)
+
+
+# ------------------------------------------------------------------ 管理员操作审计
+class AdminAudit(Base, TimestampMixin):
+    __tablename__ = "admin_audits"
+    __table_args__ = (Index("ix_audit_admin", "admin_id"),)
+
+    id = Column(Integer, primary_key=True)
+    admin_id = Column(Integer, nullable=True)
+    username = Column(String(64), default="")
+    action = Column(String(64), default="", nullable=False)
+    target_type = Column(String(32), default="")
+    target_id = Column(String(64), default="")
+    detail = Column(Text, default="")
+    ip = Column(String(64), default="")

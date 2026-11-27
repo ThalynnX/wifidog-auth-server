@@ -1,0 +1,5 @@
+# /etc/cron.d/wifidog-backup
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# 每天 03:17 备份 SQLite；失败不影响服务
+17 3 * * * root /longlong/wifidog/scripts/backup_db.sh >> /longlong/wifidog/logs/backup.log 2>&1

@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timedelta
 
 from app.config import SECRET_KEY
+from app.security import make_signed_token, parse_signed_token
 
 CHANGE_TOKEN_TTL = 900        # 换绑令牌有效期 15 分钟
 CHANGE_WINDOW_DAYS = 30       # 换绑额度周期
@@ -15,6 +16,9 @@ DEFAULT_DEVICE_CHANGE_LIMIT = 3
 MAX_DEVICE_CHANGE_LIMIT = 100
 # 兼容旧常量名；实际额度以用户 device_change_limit 为准
 MAX_CHANGES_PER_30D = DEFAULT_DEVICE_CHANGE_LIMIT
+
+DEVICE_COOKIE = "wd_device"
+DEVICE_COOKIE_TTL = 180 * 86400  # 半年内同一浏览器可自动识别
 
 
 def normalize_mac(mac: str) -> str:
@@ -137,17 +141,41 @@ def bind(db, user, mac: str) -> None:
     db.commit()
 
 
+def issue_device_cookie(user_id: int, mac: str) -> str:
+    """签发绑定到 用户+MAC 的长期设备票据（HttpOnly Cookie 使用）。"""
+    return make_signed_token(
+        "dev", f"{int(user_id)}:{normalize_mac(mac)}", DEVICE_COOKIE_TTL
+    )
+
+
+def verify_device_cookie(token: str):
+    """校验设备票据，返回 (user_id, mac)；失败返回 None。"""
+    subject = parse_signed_token(token or "", "dev")
+    if not subject or ":" not in subject:
+        return None
+    uid, mac = subject.split(":", 1)
+    try:
+        uid_i = int(uid)
+    except (TypeError, ValueError):
+        return None
+    m = normalize_mac(mac)
+    if not m:
+        return None
+    return uid_i, m
+
+
 def check_device(db, user, mac: str):
-    """登录时的设备校验。返回 (是否允许, 结果码, 提示语)。
+    """登录时的设备校验，按订阅的“同时在线设备数”放行多台设备。
 
     结果码：
       no_mac          本次请求没带 MAC（无法绑定）
-      first_bind      首次认证，已记住该设备
-      ok              与已绑定设备一致
-      reauth_rebind   非会员换了设备：本次短信认证视为重新认证，已改绑
-      device_mismatch 会员换了设备：需要自助更换设备
+      first_bind      首次认证，已记住主设备
+      ok              与已绑定主设备一致
+      multi_device    套餐允许，新增一台在线设备
+      reauth_rebind   单设备套餐在旧设备离线后换机，更新主设备
+      device_limit    超过套餐允许的同时在线设备数
     """
-    from app.services_auth import get_active_subscription
+    from app.services_auth import get_active_subscription, online_device_count
 
     m = normalize_mac(mac)
     if not m:
@@ -164,12 +192,25 @@ def check_device(db, user, mac: str):
         bind(db, user, m)
         return True, "reauth_rebind", ""
 
-    return (
-        False,
-        "device_mismatch",
-        f"该手机号已绑定其他设备（{mask_mac(bound)}）。会员可在本页点『更换为当前设备』自助改绑，"
-        f"或使用原设备连接。",
-    )
+    limit = max(0, int(getattr(sub, "device_limit", 0) or 0))
+    if limit <= 0:
+        # 0 表示不限设备；主设备保持不变，新增设备按会话记录。
+        return True, "multi_device", ""
+
+    used = online_device_count(db, user.id, exclude_mac=m)
+    if used >= limit:
+        return (
+            False,
+            "device_limit",
+            f"该套餐最多同时在线 {limit} 台设备，当前已有 {used} 台在线。"
+            "请先断开其他设备，或购买更高设备数的套餐。",
+        )
+
+    if limit == 1 and used == 0:
+        # 单设备套餐：旧设备已离线，允许把主设备更新为当前设备。
+        bind(db, user, m)
+        return True, "reauth_rebind", ""
+    return True, "multi_device", ""
 
 
 def rebind(db, user, mac: str):

@@ -97,8 +97,8 @@
     if(token) store.set('wg_token',token); if(phone) store.set('wg_phone',phone);
     Object.keys(params).forEach(key => { if(params[key]) store.set('wg_'+key,params[key]); });
   }
-  function successUrl(token){ return '/portal/success?token='+encodeURIComponent(token||store.get('wg_token'))+'&gw_id='+encodeURIComponent(params.gw_id); }
-  function goPlans(phone){ location.href='/portal/plans?phone='+encodeURIComponent(phone||store.get('wg_phone'))+'&token='+encodeURIComponent(store.get('wg_token')); }
+  function successUrl(){ return '/portal/success?gw_id='+encodeURIComponent(params.gw_id); }
+  function goPlans(phone){ location.href='/portal/plans?phone='+encodeURIComponent(phone||store.get('wg_phone')); }
   function selectTab(name){
     const sms=name==='sms'; $('smsForm').classList.toggle('hide',!sms); $('pwdForm').classList.toggle('hide',sms);
     $('smsTab').classList.toggle('active',sms); $('pwdTab').classList.toggle('active',!sms);
@@ -151,7 +151,7 @@
     if(!/^\d{4,6}$/.test(code)){say('smsMsg','请输入 4–6 位短信验证码');return;}
     UI.busy(btn,true,'正在认证…');say('smsMsg','正在验证账号与设备状态…','info');
     const r=await UI.post('/portal/api/login',Object.assign({phone,code},params));
-    if(r.ok){saveSession(r.token,phone);say('smsMsg','认证成功，正在进入网络状态页…','ok');setTimeout(()=>location.href=successUrl(r.token),350);return;}
+    if(r.ok){saveSession(r.token,phone);say('smsMsg','认证成功，正在进入网络状态页…','ok');setTimeout(()=>location.href=successUrl(),350);return;}
     UI.busy(btn,false);
     if(r.need_device){changeToken=r.change_token;showRebind(true);say('rebindMsg',r.msg||'请确认更换绑定设备');return;}
     if(r.need_buy){saveSession('',phone);say('smsMsg','验证通过，正在选择套餐…','ok');setTimeout(()=>goPlans(phone),350);return;}
@@ -164,7 +164,7 @@
     if(!username||!password){say('pwdMsg','请输入账号和密码');return;}
     UI.busy(btn,true,'正在登录…');say('pwdMsg','正在验证账号…','info');
     const r=await UI.post('/portal/api/password_login',Object.assign({username,password},params));
-    if(r.ok){saveSession(r.token,'');say('pwdMsg','登录成功，正在连接…','ok');setTimeout(()=>{location.href=r.redirect||successUrl(r.token);},350);return;}
+    if(r.ok){saveSession(r.token,'');say('pwdMsg','登录成功，正在连接…','ok');setTimeout(()=>{location.href=r.redirect||successUrl();},350);return;}
     UI.busy(btn,false);
     if(r.need_buy){say('pwdMsg','账号有效，请选择套餐','info');setTimeout(()=>goPlans(store.get('wg_phone')),500);return;}
     say('pwdMsg',r.msg||'登录失败');
@@ -177,7 +177,7 @@
     if(!changeToken){say('rebindMsg','换绑凭证已失效，请返回重新验证');return;}
     UI.busy(btn,true,'正在换绑…');say('rebindMsg','正在更新绑定并尝试放行…','info');
     const r=await UI.post('/portal/api/device/rebind',{change_token:changeToken,mac,ip,gw_id:params.gw_id});
-    if(r.ok){saveSession(r.token,'');say('rebindMsg',r.msg||'换绑成功','ok');setTimeout(()=>location.href=successUrl(r.token),450);return;}
+    if(r.ok){saveSession(r.token,'');say('rebindMsg',r.msg||'换绑成功','ok');setTimeout(()=>location.href=successUrl(),450);return;}
     UI.busy(btn,false);say('rebindMsg',r.msg||'换绑失败');
   };
 
@@ -192,7 +192,7 @@
       store.remove('wg_phone');
       saveSession(r.token||'','');
       box.textContent=r.msg||'设备已识别，正在自动放行';
-      setTimeout(()=>location.href=successUrl(r.token||''),500);
+      setTimeout(()=>location.href=successUrl(),500);
     }else{
       box.textContent=r.msg||'未识别到已认证设备，请输入手机号登录';
     }

@@ -25,7 +25,8 @@ from ..models import Session as PortalSession
 from .. import services_auth as svc
 from .. import redis_bus as ws_bus
 from ..settings_store import get_run_mode
-from .wifidog import _ws_conn_ids, _ws_pending, _ws_register, _ws_unregister
+from .wifidog import (_ws_authorize, _ws_conn_ids, _ws_gw, _ws_pending,
+                      _ws_register, _ws_unregister)
 
 logger = logging.getLogger("wifidog.ws")
 router = APIRouter()
@@ -157,14 +158,15 @@ def _process_counters(db: Session, data: dict) -> tuple[dict, dict]:
             if token:
                 sess = db.query(PortalSession).filter(
                     PortalSession.token == token).order_by(PortalSession.id.desc()).first()
-            if sess is None and mac:
-                sess = db.query(PortalSession).filter(
-                    PortalSession.mac == mac).order_by(PortalSession.id.desc()).first()
+            # 不再仅凭 MAC 反查会话：多用户共享同一 MAC/伪造 MAC 时会串号。
+            # 网关正常 counters 必须带登录 token；无 token 直接拒绝。
 
             allowed = False
             sub = None
             reason = "no_session"
-            if sess is not None:
+            if not svc.gateway_active(db, gid or device_id):
+                reason = "gateway_disabled"
+            elif sess is not None:
                 reason = ""
                 if getattr(sess, "revoked", False):
                     reason = "revoked"
@@ -245,10 +247,14 @@ def _process_counters(db: Session, data: dict) -> tuple[dict, dict]:
 
 @router.websocket("/ws/wifidogx")
 async def wifidogx_ws(websocket: WebSocket):
-    await websocket.accept()
-    db: Session = SessionLocal()
     gw_id = (websocket.query_params.get("gw_id")
              or websocket.query_params.get("device_id") or "").strip()
+    ok, why = await _ws_authorize(websocket, gw_id)
+    if not ok:
+        await websocket.close(code=1008, reason=why)
+        return
+    await websocket.accept()
+    db: Session = SessionLocal()
     await _ws_register(websocket, gw_id)
     cid = _ws_conn_ids.get(websocket, "")
     logger.info("WS 连接建立 gw_id=%s conn=%s", gw_id or "-", cid)
@@ -302,6 +308,7 @@ async def wifidogx_ws(websocket: WebSocket):
             if gid:
                 if gid != gw_id:
                     gw_id = gid
+                    _ws_gw[websocket] = gw_id
                     await ws_bus.register_conn(cid, gw_id)
 
             rid = data.get("req_id")

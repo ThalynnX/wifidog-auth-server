@@ -56,6 +56,15 @@ GWSTATS_KEY = os.getenv("WIFIDOG_GWSTATS_KEY", "").strip()
 # ---------------------------------------------------------------- 服务
 SITE_NAME = os.getenv("WIFIDOG_SITE_NAME", "WiFi 认证服务")
 PUBLIC_BASE = os.getenv("WIFIDOG_PUBLIC_BASE", "")
+# Cookie 是否加 Secure：生产 HTTPS 必须开启；本地 HTTP 调试可设为 0。
+COOKIE_SECURE = os.getenv(
+    "WIFIDOG_COOKIE_SECURE",
+    "1" if PUBLIC_BASE.startswith("https://") else "0",
+).strip() == "1"
+# 网关 WS 是否强制要求 Device.secret（生产建议开启；需在路由器 ws path 带上 secret 参数）
+WS_REQUIRE_SECRET = os.getenv("WIFIDOG_WS_REQUIRE_SECRET", "0").strip() == "1"
+# 可选的网关 WS 来源 IP 白名单（逗号分隔，支持 CIDR）；为空表示不限制
+WS_ALLOW_IPS = os.getenv("WIFIDOG_WS_ALLOW_IPS", "").strip()
 GATEWAY_PROTO = os.getenv("WIFIDOG_GATEWAY_PROTO", "http")
 
 # ---------------------------------------------------------------- 认证策略（后台可改，此处为初始值）

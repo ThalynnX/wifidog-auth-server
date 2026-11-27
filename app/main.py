@@ -5,6 +5,7 @@ import random
 import threading
 import time
 from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -24,13 +25,14 @@ from .security import hash_password
 from . import services_auth as svc
 from . import redis_bus as ws_bus
 
+_log_handler = RotatingFileHandler(
+    LOG_DIR / "wifidog.log", maxBytes=20 * 1024 * 1024, backupCount=8,
+    encoding="utf-8",
+)
 logging.basicConfig(
     level=logging.DEBUG if DEBUG else logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_DIR / "wifidog.log", encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
+    handlers=[_log_handler, logging.StreamHandler()],
 )
 logger = logging.getLogger("wifidog")
 
@@ -44,7 +46,7 @@ def _seed_defaults():
         if db.query(Admin).count() == 0:
             db.add(Admin(username="admin", password_hash=hash_password("admin123"),
                          role="admin", status=1))
-            logger.info("已创建默认管理员 admin / admin123（请登录后立即修改密码）")
+            logger.info("已创建默认管理员 admin（请登录后立即修改初始密码）")
         if db.query(Plan).count() == 0:
             demo = [
                 Plan(name="1小时体验", type="time", price=100, duration_minutes=60,
@@ -117,6 +119,34 @@ async def _expiry_worker():
         await asyncio.sleep(5)
 
 
+async def _kick_worker():
+    """每 2 秒消费踢线队列：带确认、失败退避重试，网关恢复后自动补踢。"""
+    await asyncio.sleep(1)
+    while True:
+        try:
+            db = SessionLocal()
+            try:
+                tasks = svc.pending_kick_tasks(db, 20)
+                rows = [(t.id, t.mac, t.ip, t.gw_id) for t in tasks]
+                for tid, mac, ip, gw in rows:
+                    if not svc.claim_kick_task(db, tid):
+                        continue
+                    try:
+                        ok, why = await wifidog.push_client_deny_ack(mac, ip, gw)
+                    except Exception as e:  # noqa: BLE001
+                        ok, why = False, str(e)
+                    svc.finish_kick_task(db, tid, ok, why)
+                    if not ok:
+                        logger.info("踢线未确认 id=%s mac=%s gw=%s: %s", tid, mac, gw, why)
+            finally:
+                db.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.warning("踢线队列处理失败: %s", e)
+        await asyncio.sleep(2)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -126,13 +156,16 @@ async def lifespan(app: FastAPI):
     t = threading.Thread(target=_cleanup_worker, daemon=True)
     t.start()
     expiry_task = asyncio.create_task(_expiry_worker(), name="wifidog-expiry-worker")
+    kick_task = asyncio.create_task(_kick_worker(), name="wifidog-kick-worker")
     logger.info("%s started (run_mode 初始值见后台设置)", SITE_NAME)
     yield
+    kick_task.cancel()
     expiry_task.cancel()
-    try:
-        await expiry_task
-    except asyncio.CancelledError:
-        pass
+    for task in (kick_task, expiry_task):
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     await ws_bus.stop()
     logger.info("%s stopped", SITE_NAME)
 
@@ -142,6 +175,7 @@ app = FastAPI(
     description="wifidog 认证计费服务端",
     version="2.0.3",
     lifespan=lifespan,
+    openapi_url=None,
     # API 文档仅在 DEBUG 模式暴露，生产关闭（防接口结构泄露）
     docs_url="/docs" if DEBUG else None,
     redoc_url=None,
@@ -171,6 +205,24 @@ async def _no_store_dynamic(request: Request, call_next):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
     return response
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; "
+        "connect-src 'self'; frame-ancestors 'none'; base-uri 'self'",
+    )
+    if request.url.scheme == "https":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
+
 
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
