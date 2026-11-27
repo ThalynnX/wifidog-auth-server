@@ -281,7 +281,9 @@ async def wifidogx_ws(websocket: WebSocket):
             await websocket.close(code=1008, reason="首帧格式错误")
             return
         gw_id = _client_gw_id(first_data)
-        ok, why = await _ws_authorize(websocket, gw_id)
+        dev_id = str(first_data.get("device_id")
+                     or _payload(first_data).get("device_id") or "").strip()
+        ok, why = await _ws_authorize(websocket, gw_id, dev_id, enforce_device_id=True)
         if not ok:
             await websocket.close(code=1008, reason=why)
             return
